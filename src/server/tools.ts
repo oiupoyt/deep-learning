@@ -559,6 +559,94 @@ export async function createTeachingRuntime(options: RuntimeOptions): Promise<Te
 			]
 		: [];
 
+	// ── the job tools (teach kind only; ack-and-queue, fire-and-forget) ──
+
+	const jobTool = (name: string, description: string, inputSchema: Record<string, unknown>, role: string): SessionTool => ({
+		name,
+		description,
+		parameters: inputSchema,
+		outputSchema: {
+			type: "object",
+			properties: { ok: { type: "boolean" }, ack: { type: "string" }, error: { type: "string" } },
+			required: ["ok"],
+		},
+		execute: async (args) => {
+			// The ack is immediate; the role runs in the background and its
+			// brief arrives as a queued message when it lands (the wake seam).
+			void Promise.resolve(seam.runRole(role, args as Record<string, unknown>, new AbortController().signal))
+				.then((brief) => {
+					if (typeof brief === "string" && brief.length > 0) {
+						void seam.queueMessage(`[deep-learning artifact] ${name} result:\n${brief}`).catch(() => {});
+					}
+				})
+				.catch((err: unknown) => {
+					void seam.queueMessage(
+						`[deep-learning artifact] ${name} failed: ${err instanceof Error ? err.message : String(err)}`,
+					).catch(() => {});
+				});
+			return {
+				ok: true,
+				ack: name === "research"
+					? "Research dispatched — keep teaching; the brief arrives as a new message. Cite its sources when you use them; never fabricate the result."
+					: name === "pdf"
+						? "PDF read dispatched — keep teaching; the brief arrives as a new message."
+						: "Artifact build dispatched — keep teaching; it arrives as a new message. Set up the concept first; teach with it when it lands.",
+			};
+		},
+	});
+
+	const researchTool = jobTool(
+		"research",
+		"Dispatch a background web-research agent: fact verification, current data, or niche specifics you are not certain about. One specific question per call, plus a sentence of context. The call is ASYNC and fire-and-forget — it resolves immediately and your turn continues; the brief arrives later as a new message.",
+		{
+			type: "object",
+			properties: {
+				question: { type: "string", description: "The single research question to answer. Make it specific — the researcher sees nothing else of the lesson." },
+				context: { type: "string", description: "Why you need this / what the lesson needs it for — one or two sentences." },
+			},
+			required: ["question"],
+		},
+		"research",
+	);
+	const demoTool = jobTool(
+		"demo",
+		"Dispatch a background sub-agent to build a self-contained interactive demo (single-file HTML: parameter sweeps, simulations, animations) for a DYNAMIC concept. The builder sees NOTHING else of the lesson — the brief is everything.",
+		{
+			type: "object",
+			properties: {
+				title: { type: "string", description: "Short title for the demo card." },
+				brief: { type: "string", description: "Precise brief: the concept, the parameters/controls and what each does, the interactions, the visual style, and any formulas/constants needed." },
+			},
+			required: ["title", "brief"],
+		},
+		"demo",
+	);
+	const visualTool = jobTool(
+		"visual",
+		"Dispatch a background sub-agent to draw ONE precise static SVG figure — exact spatial pictures (coordinate geometry, number lines, vectors, plots, layouts). For flows/relations/taxonomies use mermaid inline instead.",
+		{
+			type: "object",
+			properties: {
+				brief: { type: "string", description: "Exactly what the figure must show — coordinates, labels, proportions, orientation. One idea per figure." },
+			},
+			required: ["brief"],
+		},
+		"visual",
+	);
+	const pdfTool = jobTool(
+		"pdf",
+		"Dispatch a background reader for a learner-provided PDF: triage and a cited brief answering your specific question. Give the path plus the question.",
+		{
+			type: "object",
+			properties: {
+				path: { type: "string", description: "Path to the learner's PDF, as they gave it." },
+				question: { type: "string", description: "What you need from the document — the specific content or answer to extract." },
+			},
+			required: ["path", "question"],
+		},
+		"pdf",
+	);
+
 	// ── the registry (mechanics-gated) ──
 
 	const tools: Record<string, SessionTool> = {};
@@ -573,6 +661,10 @@ export async function createTeachingRuntime(options: RuntimeOptions): Promise<Te
 		}
 		tools.probe_done = probeDone;
 		tools.plan_init = planInit;
+		tools.research = researchTool;
+		tools.demo = demoTool;
+		tools.visual = visualTool;
+		tools.pdf = pdfTool;
 		for (const tool of graphTools) tools[tool.name] = tool;
 	} else {
 		tools.problem = problemTool;

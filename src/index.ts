@@ -36,6 +36,7 @@ import "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-tools";
 import "@deepseek-ai/dsh-system-prompt";
 import "@deepseek-ai/dsh-host-webserver";
+import "@deepseek-ai/dsh-web";
 import { FsGraphStore } from "./store/graph.js";
 import { FsSessionsStore, FsSettingsStore } from "./store/sessions.js";
 import { createTeachingRuntime, type TeachingRuntime, type HarnessSeam } from "./server/tools.js";
@@ -159,9 +160,9 @@ export function apply(ctx: Context, _config: Config): void {
 					requestId: `dl-${sessionId}-${Date.now()}` as never,
 				});
 			},
-			listModelPins: () => ({} as never),
-			runRole: async () => {
-				throw new Error("role runner not wired yet");
+			listModelPins: () => settingsStore.read()?.models ?? ({} as never),
+			runRole: async (role, input, signal) => {
+				return runRoleJob(role, input, signal);
 			},
 		};
 		const runtime = createTeachingRuntimeSync({ dataRoot, seam, settings: raw });
@@ -188,6 +189,130 @@ export function apply(ctx: Context, _config: Config): void {
 		// throws only if the contract changes.
 		if (!rt) throw new Error("runtime factory must resolve synchronously");
 		return rt;
+	}
+
+	/** The extraction trigger: fire-and-forget, single-flight per session.
+		 *  Failure checkpoints nothing — the next trigger re-runs (the ported law). */
+	const extractionInFlight = new Set<string>();
+	async function triggerExtraction(state: SessionState): Promise<void> {
+		if (extractionInFlight.has(state.sessionId)) return;
+		const effective = resolveSettings(settingsStore.read());
+		const extractorRoute = effective.agent.models.extractor;
+		const auditorRoute = effective.agent.models.auditor;
+		if (!extractorRoute || !auditorRoute) {
+			ctx.logger?.warn?.("deep-learning: extraction skipped — extractor/auditor role not configured");
+			return; // honest refusal; uncovered accumulates until the pins exist
+		}
+		extractionInFlight.add(state.sessionId);
+		try {
+			const messages: Array<{ id: string; role: string; content: unknown }> = state.events
+				.filter((e) => e.type === "assistant/message")
+				.map((e) => ({
+					id: (e as unknown as { message?: { id?: string } }).message?.id ?? `${e.type}-${state.events.indexOf(e)}`,
+					role: "assistant",
+					content: e.message?.content,
+				}));
+			const { runExtraction } = await import("./server/extraction.js");
+			const stats = await runExtraction({
+				llm: ctx.llm as never as import("./server/roles.js").LlmLike,
+				extractor: { provider: extractorRoute.provider, model: extractorRoute.id },
+				auditor: { provider: auditorRoute.provider, model: auditorRoute.id },
+				sourceId: state.sessionId,
+				transcript: messages,
+				store: graphStore,
+				chunkTokens: effective.graph.extractionChunkTokens,
+			});
+			ctx.logger?.info?.(`deep-learning: extraction merged ${stats.nodes} nodes, ${stats.chains ?? 0} chains from ${state.sessionId}`);
+		} catch (err) {
+			ctx.logger?.warn?.(`deep-learning: extraction failed for ${state.sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			extractionInFlight.delete(state.sessionId);
+		}
+	}
+
+	/** Run one background role to completion. Route resolution: the
+		 *  settings pins (researcher/demoBuilder/visualMaker/pdfReader/
+		 *  extractor/auditor) — BYOK law, never hardcoded; an unset pin
+		 *  refuses honestly. */
+	async function runRoleJob(role: string, input: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+		const effective = resolveSettings(settingsStore.read());
+		const route = effective.agent.models[role as keyof typeof effective.agent.models];
+		if (!route) {
+			throw new Error(
+				`no model configured for the "${role}" role — set it in Settings > Deep Learning`,
+			);
+		}
+		const llm = ctx.llm as never as import("./server/roles.js").LlmLike;
+		const { runResearch, runDemoArtifact, runVisualArtifact, runPdfBrief } = await import("./server/jobs.js");
+		if (role === "research") {
+			const web = {
+				search: async (request: { queries: string[] }, signal?: AbortSignal) => {
+					const results = [] as Array<{ title: string; url: string; snippet?: string }>;
+					for (const query of request.queries) {
+							const out = await ctx.web.search({ query }, signal);
+						results.push(
+							...out.sources.map((src) => ({
+								title: src.title ?? src.url,
+								url: src.url,
+								snippet: src.snippet,
+							})),
+						);
+					}
+					return { results };
+				},
+				fetch: async (request: { url: string }, signal?: AbortSignal) => {
+					const result = await ctx.web.fetch({ url: request.url }, signal);
+					const body = result.body as { kind?: string; text?: string } | undefined;
+					return {
+						url: result.url,
+						text:
+							typeof body?.text === "string"
+								? body.text
+								: JSON.stringify(body ?? ""),
+						};
+				},
+			} as never as import("./server/jobs.js").WebSeam;
+			return runResearch({
+				llm,
+				web,
+				route: { provider: route.provider, model: route.id },
+				question: String(input.question ?? ""),
+				context: input.context !== undefined ? String(input.context) : undefined,
+				signal,
+			});
+		}
+		if (role === "demo" || role === "visual") {
+			const options = {
+				llm,
+				route: { provider: route.provider, model: route.id },
+				brief: String(input.brief ?? ""),
+				title: input.title !== undefined ? String(input.title) : undefined,
+				signal,
+			};
+			if (role === "demo") return runDemoArtifact(options);
+			return runVisualArtifact(options);
+		}
+		if (role === "pdf") {
+			const filePath = String(input.path ?? "");
+			let text = "";
+			try {
+				text = fs.readFileSync(filePath, "latin1"); // v0.1 raw bytes; the pdfjs seam upgrades this
+			} catch {
+				throw new Error(`cannot read the PDF at ${filePath}`);
+			}
+			return runPdfBrief({
+				llm,
+				route: { provider: route.provider, model: route.id },
+				signal,
+				pdfText: text,
+				brief: String(input.question ?? ""),
+			});
+		}
+		if (role === "extractor" || role === "auditor") {
+			// Extraction routes are resolved by the pipeline caller, not here.
+			throw new Error("extraction roles run through the extraction pipeline");
+		}
+		throw new Error(`unknown role: ${role}`);
 	}
 
 	// ── the session event fold (phases, kinds, coverage triggers) ─────────
@@ -292,8 +417,7 @@ export function apply(ctx: Context, _config: Config): void {
 		// fold order but never persisted twice).
 		const covered = coverageOf(messages, graphStore.readCoverage(), state.sessionId);
 		if (covered.uncoveredTokens >= effective.graph.extractionChunkTokens) {
-			// The extraction pipeline wave wires runRole here; until then the
-			// trigger is a no-op (uncovered accumulates honestly).
+			void triggerExtraction(state);
 		}
 	}
 
