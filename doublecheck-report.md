@@ -12,16 +12,8 @@
 
 ## Test evidence
 - failing runs: 4
-- passing runs: 63
+- passing runs: 66
 
-- [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && python3 - <<'EOF'
-p = "src/tests/extraction.test.ts"
-s = open(…
-- [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && node --test lib/tests/tests/extraction.test.js 2>&1 | grep -B2…
-- [red] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && python3 - <<'EOF'
-p = "src/core/graph.ts"
-s = open(p).read()
-#…
 - [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && node --test lib/tests/tests/*.test.js 2>&1 | tail -7
 - [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && python3 - <<'EOF'
 p = "src/server/jobs.ts"
@@ -48,7 +40,12 @@ s = open(p).read()
 - [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && node --test lib/tests/tests/*.test.js 2>&1 | grep -E "^# (pass…
 - [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && sed -i 's/export const inject = \["llm", "systemPrompt", "tool…
 - [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && npm run typecheck 2>&1 | tail -2; npx tsc -p tsconfig.client.j…
-- … 48 earlier rows omitted
+- [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && npx tsc -p tsconfig.json 2>&1 | grep -c error; npx tsc -p tsco…
+- [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && python3 - <<'EOF'
+p = "src/client/panel.tsx"
+s = open(p).read(…
+- [green] cd "/home/oiupoyt/my stuff yea/projects/deep-learning" && node --test lib/tests/tests/*.test.js 2>&1 | grep -E "^# (pass…
+- … 51 earlier rows omitted
 
 ## Adversary review
 No adversary review ran for this session.
@@ -57,4 +54,4 @@ No adversary review ran for this session.
 Not run.
 
 ## Delivery
-- implementation edits: 43
+- implementation edits: 49
