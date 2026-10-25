@@ -1,0 +1,5 @@
+{"id":"n_66969f9129b1","name":"Limit","statement":"A limit describes the value a function approaches.","aliases":[],"createdAt":"2026-10-25T06:24:55.381Z","provenance":[{"chatId":"chat_calculus","messageId":"m1"}]}
+{"id":"n_63dc7bbaeb73","name":"Derivative","statement":"The derivative is the limit of the difference quotient.","aliases":["slope"],"createdAt":"2026-10-25T06:24:55.381Z","provenance":[{"chatId":"chat_calculus","messageId":"m2"}]}
+{"id":"n_fde6ebe5cb8a","name":"Continuity","statement":"A function is continuous where its limit equals its value.","aliases":[],"createdAt":"2026-10-25T06:24:55.381Z","provenance":[{"chatId":"chat_calculus","messageId":"m3"}]}
+{"id":"n_6b4b2c87ca3f","name":"Velocity","statement":"Instantaneous velocity is the derivative of position.","aliases":[],"createdAt":"2026-10-25T06:24:55.383Z","provenance":[{"chatId":"chat_physics","messageId":"m9"}]}
+{"id":"n_f4271bed0f3b","name":"Integral","statement":"The integral is the limit of Riemann sums.","aliases":["area under curve"],"createdAt":"2026-10-25T06:24:55.384Z","provenance":[{"chatId":"src_notes","messageId":""}]}
