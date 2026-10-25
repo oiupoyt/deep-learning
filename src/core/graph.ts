@@ -64,6 +64,8 @@ export interface GraphStorePort {
 	readCheckpoints(): SessionCheckpoint[];
 	appendCheckpoint(checkpoint: SessionCheckpoint): void;
 	readSources(): NotesSource[];
+	/** Upsert the imported-notes bookkeeping (idempotent per source id). */
+	upsertSource(source: NotesSource): void;
 	readPositions(): Record<string, Position>;
 	writePositions(positions: Record<string, Position>): void;
 	/** Atomic rewrite of the named ledgers (simplified/deleted state). */
@@ -110,6 +112,11 @@ export class MemoryGraphStore implements GraphStorePort {
 	}
 	readSources(): NotesSource[] {
 		return [...this.sources];
+	}
+	upsertSource(source: NotesSource): void {
+		const idx = this.sources.findIndex((s) => s.id === source.id);
+		if (idx >= 0) this.sources[idx] = source;
+		else this.sources.push(source);
 	}
 	readPositions(): Record<string, Position> {
 		return { ...this.positions };
