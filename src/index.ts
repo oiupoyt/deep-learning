@@ -98,7 +98,7 @@ interface SessionState {
 export const name = "deep-learning";
 
 /** Services the plugin waits for. */
-export const inject = ["llm", "systemPrompt", "tools", "webServer", "session", "agents"];
+export const inject = ["llm", "systemPrompt", "tools", "webServer", "connection", "web", "sessions", "agents"];
 
 /** Plugin configuration (none yet — the settings delta is the record). */
 export interface Config {}
@@ -316,241 +316,247 @@ export function apply(ctx: Context, _config: Config): void {
 		throw new Error(`unknown role: ${role}`);
 	}
 
-	// ── the session event fold (phases, kinds, coverage triggers) ─────────
+	// Every registration resolves through ctx.inject: the plugin's apply
+	// owns nothing synchronously — the services arrive when the composition
+	// provides them (the harness's dependency semantics).
+	ctx.inject(["llm", "systemPrompt", "tools", "webServer", "connection", "web", "sessions", "agents"], (scoped) => {
+			// ── the session event fold (phases, kinds, coverage triggers) ─────────
 
-	ctx.effect(function* () {
-		yield ctx.on("session/event", (session, event: FoldEvent) => {
-			const state = stateOf(session.id);
-			// Tool results: the message carries toolCallId; the fold keeps the
-			// paired call's name.
-			if (event.type === "tool/result") {
-				// The session event carries the message under `message`.
-				const toolMessage = (event as unknown as { message?: { toolCallId?: string; isError?: boolean } }).message;
-				if (toolMessage?.toolCallId) {
-					// resolve name from the paired call in the fold
-					const call = state.events.find((x) => x.type === "tool/call" && x.callId === toolMessage.toolCallId);
+		scoped.effect(function* () {
+			yield scoped.on("session/event", (session, event: FoldEvent) => {
+				const state = stateOf(session.id);
+				// Tool results: the message carries toolCallId; the fold keeps the
+				// paired call's name.
+				if (event.type === "tool/result") {
+					// The session event carries the message under `message`.
+					const toolMessage = (event as unknown as { message?: { toolCallId?: string; isError?: boolean } }).message;
+					if (toolMessage?.toolCallId) {
+						// resolve name from the paired call in the fold
+						const call = state.events.find((x) => x.type === "tool/call" && x.callId === toolMessage.toolCallId);
+						state.events.push({
+							type: "toolResult",
+							message: {
+								role: "toolResult",
+								toolName: call?.name,
+								isError: toolMessage.isError,
+							},
+						});
+					}
+					foldAdvance(state);
+					return;
+				}
+				if (event.type === "tool/call") {
 					state.events.push({
-						type: "toolResult",
+						type: "tool/call",
+						callId: event.callId,
+						name: event.name,
+						arguments: event.arguments,
+					});
+					foldAdvance(state);
+					return;
+				}
+				if (event.type === "assistant/message" || event.type === "user/message") {
+					const message = (event as unknown as { message?: { role?: string; content?: unknown; source?: { kind?: string } } }).message;
+					if (!message) return;
+					state.events.push({
+						type: event.type,
 						message: {
-							role: "toolResult",
-							toolName: call?.name,
-							isError: toolMessage.isError,
+							role: message.role,
+							content: message.content,
+							source: message.source,
 						},
 					});
-				}
-				foldAdvance(state);
-				return;
-			}
-			if (event.type === "tool/call") {
-				state.events.push({
-					type: "tool/call",
-					callId: event.callId,
-					name: event.name,
-					arguments: event.arguments,
-				});
-				foldAdvance(state);
-				return;
-			}
-			if (event.type === "assistant/message" || event.type === "user/message") {
-				const message = (event as unknown as { message?: { role?: string; content?: unknown; source?: { kind?: string } } }).message;
-				if (!message) return;
-				state.events.push({
-					type: event.type,
-					message: {
-						role: message.role,
-						content: message.content,
-						source: message.source,
-					},
-				});
-				// The kind marker: a user message whose text starts with the
-				// deep-learning session-context preamble.
-				if (message.role === "user" && typeof message.content !== "undefined") {
-					const text = textOfContent(message.content);
-					if (text.startsWith("[deep-learning:")) {
-						state.kind = text.includes("practice") ? "practice" : "teach";
+					// The kind marker: a user message whose text starts with the
+					// deep-learning session-context preamble.
+					if (message.role === "user" && typeof message.content !== "undefined") {
+						const text = textOfContent(message.content);
+						if (text.startsWith("[deep-learning:")) {
+							state.kind = text.includes("practice") ? "practice" : "teach";
+						}
 					}
+					// Coverage: teacher prose only (assistant text blocks).
+					if (message.role === "assistant" && state.kind === "teach") {
+						maybeTriggerExtraction(state, session);
+					}
+					foldAdvance(state);
+					return;
 				}
-				// Coverage: teacher prose only (assistant text blocks).
-				if (message.role === "assistant" && state.kind === "teach") {
-					maybeTriggerExtraction(state, session);
+				if (event.type === "turn/end") {
+					foldAdvance(state);
+					return;
 				}
-				foldAdvance(state);
-				return;
-			}
-			if (event.type === "turn/end") {
-				foldAdvance(state);
-				return;
-			}
-		});
-	}, "deep-learning: session fold");
+			});
+		}, "deep-learning: session fold");
 
-	/** Re-derive the phase + plan statuses after each event. */
-	function foldAdvance(state: SessionState): void {
-		if (state.kind !== "teach") return;
-		const tree = sessionsStore.readTree(state.sessionId);
-		const phaseEvents: PhaseEvent[] = state.events.map((e) => {
-			if (e.type === "toolResult") {
-				return { role: "toolResult", toolName: e.message?.toolName, isError: e.message?.isError };
-			}
-			if (e.type === "tool/call") {
-				return { role: "assistant", toolCalls: [{ name: e.name ?? "", arguments: e.arguments }] };
-			}
-			return { role: e.message?.role };
-		});
-		state.phase = phaseAt(phaseEvents);
-	}
-
-	/** The extraction trigger: after a turn ends, when uncovered teacher
-	 *  prose crosses the chunk budget (the ported seam). */
-	function maybeTriggerExtraction(state: SessionState, _session: unknown): void {
-		if (state.kind !== "teach") return;
-		const effective = resolveSettings(settingsStore.read());
-		if (!effective.graph.enabled) return;
-		const messages: CoverageMessage[] = state.events
-			.filter((e) => e.type === "assistant/message")
-			.map((e) => ({
-				id: (e as unknown as { message?: { id?: string } }).message?.id ?? `${e.type}-${state.events.indexOf(e)}`,
-				role: "assistant",
-				content: e.message?.content,
-			}));
-		// Note: coverage ids derive from message ids; the DSH log provides
-		// them on the message. Absent ids use event positions (stable per
-		// fold order but never persisted twice).
-		const covered = coverageOf(messages, graphStore.readCoverage(), state.sessionId);
-		if (covered.uncoveredTokens >= effective.graph.extractionChunkTokens) {
-			void triggerExtraction(state);
+		/** Re-derive the phase + plan statuses after each event. */
+		function foldAdvance(state: SessionState): void {
+			if (state.kind !== "teach") return;
+			const tree = sessionsStore.readTree(state.sessionId);
+			const phaseEvents: PhaseEvent[] = state.events.map((e) => {
+				if (e.type === "toolResult") {
+					return { role: "toolResult", toolName: e.message?.toolName, isError: e.message?.isError };
+				}
+				if (e.type === "tool/call") {
+					return { role: "assistant", toolCalls: [{ name: e.name ?? "", arguments: e.arguments }] };
+				}
+				return { role: e.message?.role };
+			});
+			state.phase = phaseAt(phaseEvents);
 		}
-	}
 
-	// ── the dynamic system prompt section ─────────────────────────────────
-
-	ctx.effect(function* () {
-		yield ctx.systemPrompt.section({
-			name: "deep-learning",
-			order: 50,
-			text: (assembly) => {
-				const agent = (assembly as { agent?: { id?: string } }).agent;
-				const sessionId = agent?.id;
-				if (!sessionId) return "";
-				const state = states.get(sessionId);
-				if (!state || state.kind === null) return ""; // not our session
-				const switches = resolveSettings(settingsStore.read()).agent.prompts;
-				if (state.kind === "practice") {
-					return composeInstructions(promptsRoot, "practice", { overrideRoot, switches });
-				}
-				const kind = state.phase === "probe" ? "prober" : "teacher";
-				return composeInstructions(promptsRoot, kind, { overrideRoot, switches });
-			},
-		});
-	}, "deep-learning: prompt section");
-
-	// ── the tools registration (per-session scope, phase-gated) ───────────
-
-	ctx.effect(function* () {
-		// The runtime registry is keyed by session; tools register on the
-		// agent's creation and unregister on its disposal (global-scope
-		// registration: DSH tools.register registers on the calling fiber;
-		// per-agent scoping arrives with the plugin's own scope plumbing).
-		const toolDisposers = new Map<string, Array<() => void>>();
-		yield ctx.on("agent/created", ({ agent }) => {
-			const state = states.get(agent.id);
-			if (!state || state.kind === null) return;
-			const kind = state.kind;
-			const runtime = runtimeOf(agent.id, kind);
-			const disposers: Array<() => void> = [];
-			for (const tool of Object.values(runtime.tools())) {
-				disposers.push(ctx.tools.register(toHostTool(tool, () => runtime)));
+		/** The extraction trigger: after a turn ends, when uncovered teacher
+		 *  prose crosses the chunk budget (the ported seam). */
+		function maybeTriggerExtraction(state: SessionState, _session: unknown): void {
+			if (state.kind !== "teach") return;
+			const effective = resolveSettings(settingsStore.read());
+			if (!effective.graph.enabled) return;
+			const messages: CoverageMessage[] = state.events
+				.filter((e) => e.type === "assistant/message")
+				.map((e) => ({
+					id: (e as unknown as { message?: { id?: string } }).message?.id ?? `${e.type}-${state.events.indexOf(e)}`,
+					role: "assistant",
+					content: e.message?.content,
+				}));
+			// Note: coverage ids derive from message ids; the DSH log provides
+			// them on the message. Absent ids use event positions (stable per
+			// fold order but never persisted twice).
+			const covered = coverageOf(messages, graphStore.readCoverage(), state.sessionId);
+			if (covered.uncoveredTokens >= effective.graph.extractionChunkTokens) {
+				void triggerExtraction(state);
 			}
-			toolDisposers.set(agent.id, disposers);
-		});
-		yield ctx.on("agent/disposed", ({ agent }) => {
-			const disposers = toolDisposers.get(agent.id);
-			if (disposers) for (const dispose of disposers) dispose();
-			toolDisposers.delete(agent.id);
-			states.delete(agent.id);
-		});
-	}, "deep-learning: tools");
+		}
 
-	// ── the web routes (the client bundle's API, over the connection's
-	//    /api fetch-route registry — the browser-authenticated surface) ────
+		// ── the dynamic system prompt section ─────────────────────────────────
 
-	const json = (body: unknown, status = 200): Response =>
-		new Response(JSON.stringify(body), {
-			status,
-			headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-		});
-
-	ctx.effect(function* () {
-		yield ctx.connection.fetch.register({
-			path: "/api/deep-learning/graph",
-			methods: ["GET"],
-			requestBody: "buffered",
-			fetch: async (_request: Request) => {
-				const { graphSnapshot } = await import("./server/snapshot.js");
-				return json(graphSnapshot(graphStore, sessionsStore, ctx));
-			},
-		});
-		yield ctx.connection.fetch.register({
-			path: "/api/deep-learning/settings",
-			methods: ["GET", "POST"],
-			requestBody: "buffered",
-			fetch: async (request: Request) => {
-				if (request.method === "GET") return json({ settings: settingsStore.read() });
-				const body = (await request.json().catch(() => ({}))) as UserSettings;
-				settingsStore.update(body);
-				for (const state of states.values()) state.runtimeSettings = ""; // invalidate cached runtimes
-				return json({ ok: true });
-			},
-		});
-		yield ctx.connection.fetch.register({
-			path: "/api/deep-learning/question",
-			methods: ["GET", "POST"],
-			requestBody: "buffered",
-			fetch: async (request: Request) => {
-				const url = new URL(request.url);
-				if (request.method === "GET") {
-					const sessionId = url.searchParams.get("session");
-					if (!sessionId) return json({ error: "missing session" }, 400);
+		scoped.effect(function* () {
+			yield scoped.systemPrompt.section({
+				name: "deep-learning",
+				order: 50,
+				text: (assembly) => {
+					const agent = (assembly as { agent?: { id?: string } }).agent;
+					const sessionId = agent?.id;
+					if (!sessionId) return "";
 					const state = states.get(sessionId);
-					return json({ question: state?.runtime ? state.runtime.pendingQuestion(sessionId) : null });
+					if (!state || state.kind === null) return ""; // not our session
+					const switches = resolveSettings(settingsStore.read()).agent.prompts;
+					if (state.kind === "practice") {
+						return composeInstructions(promptsRoot, "practice", { overrideRoot, switches });
+					}
+					const kind = state.phase === "probe" ? "prober" : "teacher";
+					return composeInstructions(promptsRoot, kind, { overrideRoot, switches });
+				},
+			});
+		}, "deep-learning: prompt section");
+
+		// ── the tools registration (per-session scope, phase-gated) ───────────
+
+		scoped.effect(function* () {
+			// The runtime registry is keyed by session; tools register on the
+			// agent's creation and unregister on its disposal (global-scope
+			// registration: DSH tools.register registers on the calling fiber;
+			// per-agent scoping arrives with the plugin's own scope plumbing).
+			const toolDisposers = new Map<string, Array<() => void>>();
+			yield scoped.on("agent/created", ({ agent }) => {
+				const state = states.get(agent.id);
+				if (!state || state.kind === null) return;
+				const kind = state.kind;
+				const runtime = runtimeOf(agent.id, kind);
+				const disposers: Array<() => void> = [];
+				for (const tool of Object.values(runtime.tools())) {
+					disposers.push(scoped.tools.register(toHostTool(tool, () => runtime)));
 				}
-				// POST: submit an answer { session, ...AnswerRequest }
-				const body = (await request.json().catch(() => null)) as (Record<string, unknown> & { session?: string }) | null;
-				if (!body?.session) return json({ error: "missing session" }, 400);
-				const state = states.get(body.session);
-				if (!state?.runtime) return json({ error: "no question pending" }, 409);
-				const ok = state.runtime.answerQuestion(body.session, body as never);
-				return ok ? json({ ok: true }) : json({ error: "no question pending" }, 409);
-			},
-		});
-		yield ctx.connection.fetch.register({
-			path: "/api/deep-learning/notes/import",
-			methods: ["POST"],
-			requestBody: "buffered",
-			fetch: async (request: Request) => {
-				const body = (await request.json().catch(() => ({}))) as { text?: string; filePath?: string };
-				const text = typeof body.text === "string" ? body.text : "";
-				const filePath = typeof body.filePath === "string" && body.filePath.length > 0 ? body.filePath : "pasted.md";
-				const effective = resolveSettings(settingsStore.read());
-				const extractorRoute = effective.agent.models.extractor;
-				const auditorRoute = effective.agent.models.auditor;
-				if (!extractorRoute || !auditorRoute) {
-					return json({ error: "extraction roles not configured — set the extractor/auditor models in Settings > Deep Learning" }, 503);
-				}
-				const { importNotes } = await import("./server/extraction.js");
-				const stats = await importNotes({
-					llm: ctx.llm as never as import("./server/roles.js").LlmLike,
-					extractor: { provider: extractorRoute.provider, model: extractorRoute.id },
-					auditor: { provider: auditorRoute.provider, model: auditorRoute.id },
-					filePath,
-					text,
-					store: graphStore,
-					chunkTokens: effective.graph.extractionChunkTokens,
-				});
-				return json({ ok: true, nodes: stats.nodes, chains: stats.chains ?? 0 });
-			},
-		});
-	}, "deep-learning: web routes");
+				toolDisposers.set(agent.id, disposers);
+			});
+			yield scoped.on("agent/disposed", ({ agent }) => {
+				const disposers = toolDisposers.get(agent.id);
+				if (disposers) for (const dispose of disposers) dispose();
+				toolDisposers.delete(agent.id);
+				states.delete(agent.id);
+			});
+		}, "deep-learning: tools");
+
+		// ── the web routes (the client bundle's API, over the connection's
+		//    /api fetch-route registry — the browser-authenticated surface) ────
+
+		const json = (body: unknown, status = 200): Response =>
+			new Response(JSON.stringify(body), {
+				status,
+				headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+			});
+
+		scoped.effect(function* () {
+			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/graph",
+				methods: ["GET"],
+				requestBody: "buffered",
+				fetch: async (_request: Request) => {
+					const { graphSnapshot } = await import("./server/snapshot.js");
+					return json(graphSnapshot(graphStore, sessionsStore, ctx));
+				},
+			});
+			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/settings",
+				methods: ["GET", "POST"],
+				requestBody: "buffered",
+				fetch: async (request: Request) => {
+					if (request.method === "GET") return json({ settings: settingsStore.read() });
+					const body = (await request.json().catch(() => ({}))) as UserSettings;
+					settingsStore.update(body);
+					for (const state of states.values()) state.runtimeSettings = ""; // invalidate cached runtimes
+					return json({ ok: true });
+				},
+			});
+			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/question",
+				methods: ["GET", "POST"],
+				requestBody: "buffered",
+				fetch: async (request: Request) => {
+					const url = new URL(request.url);
+					if (request.method === "GET") {
+						const sessionId = url.searchParams.get("session");
+						if (!sessionId) return json({ error: "missing session" }, 400);
+						const state = states.get(sessionId);
+						return json({ question: state?.runtime ? state.runtime.pendingQuestion(sessionId) : null });
+					}
+					// POST: submit an answer { session, ...AnswerRequest }
+					const body = (await request.json().catch(() => null)) as (Record<string, unknown> & { session?: string }) | null;
+					if (!body?.session) return json({ error: "missing session" }, 400);
+					const state = states.get(body.session);
+					if (!state?.runtime) return json({ error: "no question pending" }, 409);
+					const ok = state.runtime.answerQuestion(body.session, body as never);
+					return ok ? json({ ok: true }) : json({ error: "no question pending" }, 409);
+				},
+			});
+			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/notes/import",
+				methods: ["POST"],
+				requestBody: "buffered",
+				fetch: async (request: Request) => {
+					const body = (await request.json().catch(() => ({}))) as { text?: string; filePath?: string };
+					const text = typeof body.text === "string" ? body.text : "";
+					const filePath = typeof body.filePath === "string" && body.filePath.length > 0 ? body.filePath : "pasted.md";
+					const effective = resolveSettings(settingsStore.read());
+					const extractorRoute = effective.agent.models.extractor;
+					const auditorRoute = effective.agent.models.auditor;
+					if (!extractorRoute || !auditorRoute) {
+						return json({ error: "extraction roles not configured — set the extractor/auditor models in Settings > Deep Learning" }, 503);
+					}
+					const { importNotes } = await import("./server/extraction.js");
+					const stats = await importNotes({
+						llm: scoped.llm as never as import("./server/roles.js").LlmLike,
+						extractor: { provider: extractorRoute.provider, model: extractorRoute.id },
+						auditor: { provider: auditorRoute.provider, model: auditorRoute.id },
+						filePath,
+						text,
+						store: graphStore,
+						chunkTokens: effective.graph.extractionChunkTokens,
+					});
+					return json({ ok: true, nodes: stats.nodes, chains: stats.chains ?? 0 });
+				},
+			});
+		}, "deep-learning: web routes");
+	});
+
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
