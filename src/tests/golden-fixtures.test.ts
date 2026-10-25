@@ -11,7 +11,7 @@ import { FsGraphStore } from "../store/graph.js";
 import { getGraph, deriveView, birthSessionPartition } from "../core/graph.js";
 import { settleGraphLayout } from "../core/layout-settle.js";
 
-const fixtureDir = path.resolve(import.meta.dirname, "../../../tests/fixtures/golden-graph");
+const fixtureDir = path.resolve(import.meta.dirname, "../../../tests/fixtures/golden-data/graph");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dl-golden-read-"));
 
 test("golden fixture: real data parses and derives end-to-end", { skip: !fs.existsSync(fixtureDir) }, () => {

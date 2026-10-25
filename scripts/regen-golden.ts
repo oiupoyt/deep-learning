@@ -75,7 +75,7 @@ store.upsertSource({ id: "src_notes", filePath: "/notes/calculus-basics.md", imp
 settleGraphLayout(store);
 
 // Copy to the fixture dir.
-const dest = path.resolve(import.meta.dirname, "../tests/fixtures/golden-graph");
+const dest = path.resolve(import.meta.dirname, "../tests/fixtures/golden-data/graph");
 fs.rmSync(dest, { recursive: true, force: true });
 fs.mkdirSync(path.dirname(dest), { recursive: true });
 fs.cpSync(path.join(root, "graph"), dest, { recursive: true });
