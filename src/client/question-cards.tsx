@@ -11,6 +11,7 @@
 
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
+import { ConfidenceRail, CONFIDENCE_STOPS } from "./confidence-rail.js";
 
 interface SlotsLike {
 	inject(slot: string, setup: () => unknown): void;
@@ -236,11 +237,13 @@ function QuestionBody({
 							{ className: "dl-q-options" },
 							pending.options.map((option, index) =>
 								React.createElement(
-									"div",
+									"button",
 									{
 										key: option.value,
+										type: "button",
 										className: "dl-opt",
 										"data-picked": picked.has(option.value) ? "true" : "false",
+										"data-square": multi ? "true" : "false",
 										onClick: () => {
 											if (dontKnow) return;
 											setPicked((prev) => {
@@ -255,7 +258,11 @@ function QuestionBody({
 											});
 										},
 									},
-									React.createElement("span", { className: "dl-opt-idx" }, `${index + 1}.`),
+									React.createElement(
+										"span",
+										{ className: "dl-opt-marker" },
+										picked.has(option.value) ? (multi ? "\u2713" : "") : "",
+									),
 									React.createElement("span", null, option.label),
 								),
 							),
@@ -271,11 +278,12 @@ function QuestionBody({
 					React.createElement(
 						"div",
 						{ className: "dl-thinking" },
+						React.createElement("span", { className: "dl-thinking-label" }, "Your thinking"),
 						React.createElement("textarea", {
 							className: "dl-textarea",
 							value: thinking,
 							onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setThinking(e.target.value),
-							placeholder: "your thinking — optional, and the most useful thing you can give",
+							placeholder: "dump your reasoning — how you approached it, where you're unsure",
 						}),
 					),
 					pending.kind === "quiz" &&
@@ -283,11 +291,12 @@ function QuestionBody({
 						React.createElement(
 							"div",
 							{ className: "dl-confidence-row" },
-							React.createElement("span", { className: "dl-sub" }, "confidence"),
+							React.createElement("span", { className: "dl-confidence-label" }, "confidence"),
+							React.createElement(ConfidenceRail, { value: confidence ?? 50 }),
 							React.createElement(
 								"div",
-								{ className: "dl-confidence-track" },
-								[0, 30, 50, 70, 90, 100].map((stop) =>
+								{ className: "dl-confidence-stop-btns" },
+								CONFIDENCE_STOPS.map((stop) =>
 									React.createElement(
 										"button",
 										{

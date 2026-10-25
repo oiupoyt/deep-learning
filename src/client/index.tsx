@@ -43,7 +43,7 @@ export function apply(ctx: unknown): void {
 					name: "sidebar.panellist",
 					id: "deep-learning",
 					order: 30,
-					label: () => "Learning",
+					label: () => "Learn Mode",
 					locale: "deepLearning",
 				},
 				PanelIcon,

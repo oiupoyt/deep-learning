@@ -528,6 +528,71 @@ export function apply(ctx: Context, _config: Config): void {
 				},
 			});
 			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/session/start",
+				methods: ["POST"],
+				requestBody: "buffered",
+				fetch: async (request: Request) => {
+					const body = (await request.json().catch(() => ({}))) as {
+						mode?: string;
+						goal?: string;
+					};
+					const mode = body.mode === "practice" ? "practice" : "teach";
+					const goal = typeof body.goal === "string" ? body.goal : "";
+					if (goal.trim().length === 0) return json({ error: "say what you want to learn first" }, 400);
+					const controller = scoped.get("sessionController");
+					if (!controller) return json({ error: "session controller unavailable" }, 503);
+					try {
+						const created = await (controller as {
+							create(request: Record<string, unknown>): Promise<{ sessionId: string }>;
+						}).create({});
+						const sessionId = created.sessionId;
+						// Mark the session in the list: the Learn Mode title badge.
+						const title = `[${mode === "practice" ? "Practice" : "Learn"}] ${goal.replace(/\s+/g, " ").trim().slice(0, 60)}`;
+						await (controller as {
+							rename(request: Record<string, unknown>): Promise<unknown>;
+						}).rename({ sessionId, title }).catch(() => {
+							// A rename failure never blocks the lesson; the marker
+							// text still carries the kind for the fold.
+						});
+						const marker = `[deep-learning: ${mode}]`;
+						await (controller as {
+							prompt(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+						}).prompt(
+							{
+								sessionId,
+								mode: "queue",
+								content: [{ type: "text", text: `${marker}\n${goal}` }],
+								requestId: `dl-${sessionId}-${Date.now()}`,
+							},
+							undefined,
+						).catch(() => {
+							// The prompt is queued best-effort; the learner can send
+							// it themselves if this path failed.
+						});
+						return json({ ok: true, sessionId });
+					} catch (err) {
+							return json({ error: err instanceof Error ? err.message : "session create failed" }, 500);
+						}
+					},
+			});
+		yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/models",
+				methods: ["GET"],
+				requestBody: "buffered",
+				fetch: async () => {
+					// The harness's own live catalog - providers + models for the
+					// settings dropdowns (the Models page's source, same API).
+					const mod = (await import(
+						"@deepseek-ai/dsh-api-session-controller" as string
+					).catch(() => undefined)) as { buildModelCatalog?: unknown } | undefined;
+					if (!mod || typeof mod.buildModelCatalog !== "function") {
+						return json({ error: "model catalog unavailable" }, 503);
+					}
+					const catalog = await (mod.buildModelCatalog as (ctx: unknown, def?: unknown) => Promise<unknown>)(scoped);
+					return json(catalog);
+				},
+			});
+			yield scoped.connection.fetch.register({
 				path: "/api/deep-learning/notes/import",
 				methods: ["POST"],
 				requestBody: "buffered",

@@ -10,6 +10,7 @@
  */
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
+import { ConfidenceRail, CONFIDENCE_STOPS } from "./confidence-rail.js";
 const QUESTION_TOOLS = ["probe", "quiz", "recall", "explain", "ask_user_question", "problem", "conclude", "plan_init", "probe_done"];
 export function registerQuestionCards(slots, api) {
     ensureStyle();
@@ -156,10 +157,12 @@ function QuestionBody({ pending, answer, }) {
         React.createElement("div", { style: { color: "#888888", marginTop: 6, fontSize: 12 } }, pending.context), !revealed
         ? React.createElement("button", { className: "dl-reveal", onClick: () => setRevealed(true) }, "check your understanding")
         : React.createElement(React.Fragment, null, pending.kind === "quiz" &&
-            React.createElement("div", { className: "dl-q-options" }, pending.options.map((option, index) => React.createElement("div", {
+            React.createElement("div", { className: "dl-q-options" }, pending.options.map((option, index) => React.createElement("button", {
                 key: option.value,
+                type: "button",
                 className: "dl-opt",
                 "data-picked": picked.has(option.value) ? "true" : "false",
+                "data-square": multi ? "true" : "false",
                 onClick: () => {
                     if (dontKnow)
                         return;
@@ -176,21 +179,21 @@ function QuestionBody({ pending, answer, }) {
                         return next;
                     });
                 },
-            }, React.createElement("span", { className: "dl-opt-idx" }, `${index + 1}.`), React.createElement("span", null, option.label)))), pending.kind === "explain" &&
+            }, React.createElement("span", { className: "dl-opt-marker" }, picked.has(option.value) ? (multi ? "\u2713" : "") : ""), React.createElement("span", null, option.label)))), pending.kind === "explain" &&
             React.createElement("textarea", {
                 className: "dl-textarea",
                 value: text,
                 onChange: (e) => setText(e.target.value),
                 placeholder: "your answer, in your own words",
                 style: { marginTop: 10 },
-            }), React.createElement("div", { className: "dl-thinking" }, React.createElement("textarea", {
+            }), React.createElement("div", { className: "dl-thinking" }, React.createElement("span", { className: "dl-thinking-label" }, "Your thinking"), React.createElement("textarea", {
             className: "dl-textarea",
             value: thinking,
             onChange: (e) => setThinking(e.target.value),
-            placeholder: "your thinking — optional, and the most useful thing you can give",
+            placeholder: "dump your reasoning — how you approached it, where you're unsure",
         })), pending.kind === "quiz" &&
             !dontKnow &&
-            React.createElement("div", { className: "dl-confidence-row" }, React.createElement("span", { className: "dl-sub" }, "confidence"), React.createElement("div", { className: "dl-confidence-track" }, [0, 30, 50, 70, 90, 100].map((stop) => React.createElement("button", {
+            React.createElement("div", { className: "dl-confidence-row" }, React.createElement("span", { className: "dl-confidence-label" }, "confidence"), React.createElement(ConfidenceRail, { value: confidence ?? 50 }), React.createElement("div", { className: "dl-confidence-stop-btns" }, CONFIDENCE_STOPS.map((stop) => React.createElement("button", {
                 key: stop,
                 className: "dl-stop",
                 "data-on": confidence === stop ? "true" : "false",

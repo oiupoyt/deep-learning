@@ -337,26 +337,20 @@ function NewSessionDraft({ api }: { api: string }): React.ReactElement {
 			return;
 		}
 		setStatus("starting…");
-		// Create the DSH session with the marker as the first prompt: the
-		// plugin's fold reads the kind from it.
-		const marker = `[deep-learning: ${mode}]`;
-		fetch("/api/session/prompt", {
+		// The plugin's own route: server-side create + Learn Mode title mark +
+		// the kind-marker prompt (the fold reads the session kind from it).
+		fetch(`${api}/session/start`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				requestId: `dl-${Date.now()}`,
-				sessionId: undefined,
-				mode: "queue",
-				content: [{ type: "text", text: `${marker}\n${goal}` }],
-			}),
+			body: JSON.stringify({ mode, goal }),
 		})
 			.then((r) => r.json())
-			.then((value: { sessionId?: string }) => {
-				if (value.sessionId) {
+			.then((value: { ok?: boolean; sessionId?: string; error?: string }) => {
+				if (value.ok === true && value.sessionId) {
 					window.location.hash = `#/session/${value.sessionId}`;
 					setStatus(null);
 				} else {
-					setStatus("session create failed");
+					setStatus(value.error ?? "session create failed");
 				}
 			})
 			.catch(() => setStatus("session create failed"));
@@ -396,7 +390,6 @@ function NewSessionDraft({ api }: { api: string }): React.ReactElement {
 			null,
 			React.createElement("button", { className: "dl-btn", onClick: start, disabled: status === "starting…" }, "start session"),
 		),
-		void api,
 	);
 }
 
