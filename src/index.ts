@@ -502,6 +502,29 @@ export function apply(ctx: Context, _config: Config): void {
 						const { graphSnapshot } = await import("./server/snapshot.js");
 						return json(res, 200, graphSnapshot(graphStore, sessionsStore, ctx));
 					}
+					// POST /api/deep-learning/notes/import
+					if (req.method === "POST" && route === "/api/deep-learning/notes/import") {
+						const body = (await readJson(req)) as { text?: string; filePath?: string };
+						const text = typeof body.text === "string" ? body.text : "";
+						const filePath = typeof body.filePath === "string" && body.filePath.length > 0 ? body.filePath : "pasted.md";
+						const effective = resolveSettings(settingsStore.read());
+						const extractorRoute = effective.agent.models.extractor;
+						const auditorRoute = effective.agent.models.auditor;
+						if (!extractorRoute || !auditorRoute) {
+							return json(res, 503, { error: "extraction roles not configured — set the extractor/auditor models in Settings > Deep Learning" });
+						}
+						const { importNotes } = await import("./server/extraction.js");
+						const stats = await importNotes({
+							llm: ctx.llm as never as import("./server/roles.js").LlmLike,
+							extractor: { provider: extractorRoute.provider, model: extractorRoute.id },
+							auditor: { provider: auditorRoute.provider, model: auditorRoute.id },
+							filePath,
+							text,
+							store: graphStore,
+							chunkTokens: effective.graph.extractionChunkTokens,
+						});
+						return json(res, 200, { ok: true, nodes: stats.nodes, chains: stats.chains ?? 0 });
+					}
 					// GET /api/deep-learning/settings + PUT
 					if (req.method === "GET" && route === "/api/deep-learning/settings") {
 						return json(res, 200, { settings: settingsStore.read() });

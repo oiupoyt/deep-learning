@@ -1,0 +1,322 @@
+/**
+ * The question cards — the toolview registrations for the teaching/
+ * practice tools + the composer-dock companion that renders the pending
+ * question and posts the learner's answer to /api/deep-learning.
+ *
+ * The answer UI (the ported dock law): options with seeded display order
+ * already applied server-side, a thinking field, the confidence ladder,
+ * "I don't know", and the reveal-collapsed check. Grading happens
+ * server-side (question-core); the verdict + explanation render here.
+ */
+
+import * as React from "react";
+import { ensureStyle } from "./styles.js";
+
+interface SlotsLike {
+	inject(slot: string, setup: () => unknown): void;
+	register(options: Record<string, unknown>, component: unknown): () => void;
+}
+
+/** One client-facing pending question (the server's ClientPending). */
+export interface ClientPending {
+	id: string;
+	tool: string;
+	kind: "quiz" | "ask" | "explain";
+	questionType?: string;
+	question: string;
+	context?: string;
+	mode: string;
+	options: Array<{ label: string; value: string }>;
+	needsReveal: boolean;
+}
+
+const QUESTION_TOOLS = ["probe", "quiz", "recall", "explain", "ask_user_question", "problem", "conclude", "plan_init", "probe_done"];
+
+export function registerQuestionCards(slots: SlotsLike, api: string): void {
+	ensureStyle();
+
+	// The toolview cards: one keyed entry per teaching tool. The answer UI
+	// mounts inside the card for question tools when their call is the
+	// session's pending question.
+	for (const tool of QUESTION_TOOLS) {
+		slots.inject("tool.call.toolview", () =>
+			slots.register(
+				{
+					name: "tool.call.toolview",
+					key: tool,
+					locale: "deepLearning",
+					inject: () => ({ apiRoot: api, toolName: tool }),
+				},
+				ToolCard,
+			),
+		);
+	}
+
+	// The composer-dock companion: while a question is pending, a compact
+	// answer surface rides with the composer (the ported dock's placement).
+	slots.inject("conversation.composer.dock", () =>
+		slots.register(
+			{
+				name: "conversation.composer.dock",
+				id: "deep-learning-question",
+				order: 20,
+				locale: "deepLearning",
+				inject: () => ({ apiRoot: api }),
+			},
+			DockCompanion,
+		),
+	);
+}
+
+// ─── the shared pending-question machinery ───────────────────────────────────
+
+function usePending(api: string): {
+	pending: ClientPending | null;
+	answer: (request: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+} {
+	const [pending, setPending] = React.useState<ClientPending | null>(null);
+	React.useEffect(() => {
+		let cancelled = false;
+		const sessionId = sessionIdOf();
+		if (!sessionId) return;
+		fetch(`${api}/question/${sessionId}`)
+			.then((r) => r.json())
+			.then((data: { question: ClientPending | null }) => {
+				if (!cancelled) setPending(data.question);
+			})
+			.catch(() => {});
+		return () => {
+			cancelled = true;
+		};
+	}, [api]);
+	const answer = React.useCallback(
+		async (request: Record<string, unknown>) => {
+			const sessionId = sessionIdOf();
+			if (!sessionId) return null;
+			try {
+				const r = await fetch(`${api}/question/${sessionId}/answer`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(request),
+				});
+				const data = (await r.json()) as Record<string, unknown>;
+				return data;
+			} catch {
+				return null;
+			}
+		},
+		[api],
+	);
+	return { pending, answer };
+}
+
+/** The session id from the URL (the web client's session route). */
+function sessionIdOf(): string | null {
+	const match = window.location.hash.match(/session\/([a-zA-Z0-9-]+)/) ?? window.location.pathname.match(/session\/([a-zA-Z0-9-]+)/);
+	return match?.[1] ?? null;
+}
+
+// ─── the toolview card ────────────────────────────────────────────────────────
+
+function ToolCard(props: { apiRoot?: string; toolName?: string; call?: unknown } & Record<string, unknown>): React.ReactElement {
+	const api = props.apiRoot ?? "/api/deep-learning";
+	const tool = props.toolName ?? "";
+	const { pending, answer } = usePending(api);
+
+	const isQuestionTool = ["probe", "quiz", "recall", "explain"].includes(tool);
+	if (!isQuestionTool) {
+		// Non-question tools render the harness's generic card (return an
+		// empty element so the default row shows through the slot).
+		return React.createElement("div", { style: { display: "none" } });
+	}
+	if (pending === null || pending.tool !== tool) {
+		return React.createElement("div", { style: { display: "none" } });
+	}
+	return React.createElement(QuestionBody, { pending: pending, answer: answer });
+}
+
+// ─── the dock companion ───────────────────────────────────────────────────────
+
+function DockCompanion(props: { apiRoot?: string } & Record<string, unknown>): React.ReactElement | null {
+	const api = props.apiRoot ?? "/api/deep-learning";
+	const { pending, answer } = usePending(api);
+	if (pending === null) return null;
+	return React.createElement(
+		"div",
+		{ "data-dl-dock": "true", style: { padding: "0 0 8px" } },
+		React.createElement(QuestionBody, { pending: pending, answer: answer }),
+	);
+}
+
+// ─── the question body (the card's content) ────────────────────────────────────
+
+function QuestionBody({
+	pending,
+	answer,
+}: {
+	pending: ClientPending;
+	answer: (request: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+}): React.ReactElement {
+	const multi = pending.mode === "multi-select";
+	const [picked, setPicked] = React.useState<Set<string>>(new Set());
+	const [text, setText] = React.useState("");
+	const [thinking, setThinking] = React.useState("");
+	const [confidence, setConfidence] = React.useState<number | null>(null);
+	const [dontKnow, setDontKnow] = React.useState(false);
+	const [revealed, setRevealed] = React.useState(!pending.needsReveal);
+	const [verdict, setVerdict] = React.useState<Record<string, unknown> | null>(null);
+	const [busy, setBusy] = React.useState(false);
+
+	const kindLabel =
+		pending.questionType === "predict"
+			? "prediction"
+			: pending.questionType === "check"
+				? "check"
+				: pending.tool === "probe" || pending.tool === "recall"
+					? "probe"
+					: "question";
+
+	const submit = async () => {
+		if (busy) return;
+		setBusy(true);
+		const request: Record<string, unknown> = { dontKnow };
+		if (pending.kind === "quiz" && !dontKnow) {
+			if (picked.size === 0 && !multi) return setBusy(false);
+			if (picked.size > 0) request.values = [...picked];
+		}
+		if (pending.kind === "explain" && !dontKnow) request.text = text;
+		if (thinking.trim().length > 0) request.thinking = thinking;
+		if (pending.kind === "quiz" && !dontKnow && confidence !== null) request.confidence = confidence;
+		const result = await answer(request);
+		setBusy(false);
+		if (result !== null && (result.ok === true || result.ok === undefined)) {
+			setVerdict({ submitted: true });
+		}
+	};
+
+	if (verdict !== null) {
+		return React.createElement(
+			"div",
+			{ className: "dl-q" },
+			React.createElement("div", { className: "dl-verdict", "data-c": "true" }, "answer submitted — the teacher continues from here"),
+		);
+	}
+
+	return React.createElement(
+		"div",
+		{ className: "dl-q" },
+		React.createElement(
+			"div",
+			{ className: "dl-q-kind" },
+			React.createElement(
+				"span",
+				{ className: pending.questionType === "predict" ? "dl-kind-active" : "dl-kind-check" },
+				kindLabel,
+			),
+			pending.tool === "recall" || pending.tool === "explain"
+				? React.createElement("span", null, "free recall — answer in your own words")
+				: null,
+		),
+		React.createElement("div", { className: "dl-q-text" }, pending.question),
+		pending.context !== undefined &&
+			pending.context.length > 0 &&
+			React.createElement("div", { style: { color: "#888888", marginTop: 6, fontSize: 12 } }, pending.context),
+		!revealed
+			? React.createElement("button", { className: "dl-reveal", onClick: () => setRevealed(true) }, "check your understanding")
+			: React.createElement(
+					React.Fragment,
+					null,
+					pending.kind === "quiz" &&
+						React.createElement(
+							"div",
+							{ className: "dl-q-options" },
+							pending.options.map((option, index) =>
+								React.createElement(
+									"div",
+									{
+										key: option.value,
+										className: "dl-opt",
+										"data-picked": picked.has(option.value) ? "true" : "false",
+										onClick: () => {
+											if (dontKnow) return;
+											setPicked((prev) => {
+												const next = new Set(multi ? prev : []);
+												if (multi) {
+													if (prev.has(option.value)) next.delete(option.value);
+													else next.add(option.value);
+													return next;
+												}
+												next.add(option.value);
+												return next;
+											});
+										},
+									},
+									React.createElement("span", { className: "dl-opt-idx" }, `${index + 1}.`),
+									React.createElement("span", null, option.label),
+								),
+							),
+						),
+					pending.kind === "explain" &&
+						React.createElement("textarea", {
+							className: "dl-textarea",
+							value: text,
+							onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setText(e.target.value),
+							placeholder: "your answer, in your own words",
+							style: { marginTop: 10 },
+						}),
+					React.createElement(
+						"div",
+						{ className: "dl-thinking" },
+						React.createElement("textarea", {
+							className: "dl-textarea",
+							value: thinking,
+							onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setThinking(e.target.value),
+							placeholder: "your thinking — optional, and the most useful thing you can give",
+						}),
+					),
+					pending.kind === "quiz" &&
+						!dontKnow &&
+						React.createElement(
+							"div",
+							{ className: "dl-confidence-row" },
+							React.createElement("span", { className: "dl-sub" }, "confidence"),
+							React.createElement(
+								"div",
+								{ className: "dl-confidence-track" },
+								[0, 30, 50, 70, 90, 100].map((stop) =>
+									React.createElement(
+										"button",
+										{
+											key: stop,
+											className: "dl-stop",
+											"data-on": confidence === stop ? "true" : "false",
+											onClick: () => setConfidence(stop),
+										},
+										`${stop}`,
+									),
+								),
+							),
+						),
+					React.createElement(
+						"div",
+						{ className: "dl-q-actions" },
+						pending.kind === "quiz" &&
+							React.createElement(
+								"button",
+								{
+									className: "dl-btn",
+									"data-on": dontKnow ? "true" : "false",
+									onClick: () => setDontKnow((v) => !v),
+								},
+								"i don't know",
+							),
+						React.createElement("span", { className: "dl-spacer" }),
+						React.createElement(
+							"button",
+							{ className: "dl-btn", onClick: submit, disabled: busy },
+							busy ? "submitting…" : "submit",
+						),
+					),
+				),
+	);
+}
