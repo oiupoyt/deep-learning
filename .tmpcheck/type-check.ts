@@ -1,0 +1,12 @@
+import "@deepseek-ai/dsh-session";
+import "@deepseek-ai/dsh-agent";
+import "@deepseek-ai/dsh-tools";
+import "@deepseek-ai/dsh-system-prompt";
+import "@deepseek-ai/dsh-host-webserver";
+import type { Context } from "@deepseek-ai/cordis";
+const ctx = {} as Context;
+ctx.on("session/event", () => {});
+ctx.systemPrompt.section({ name: "x", order: 1, text: "" });
+ctx.tools.register({} as never);
+ctx.webServer.register({ kind: "prefix", path: "/x", handler: () => {} });
+ctx.on("agent/created", () => {});
