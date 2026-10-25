@@ -66,6 +66,7 @@
   },
   "homepage": "https://github.com/oiupoyt/deep-learning#readme",
   "devDependencies": {
+    "@types/d3-force": "^3.0.10",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
