@@ -1,0 +1,40 @@
+# NOTICE
+
+## deep-learning
+
+Copyright (C) 2026 oiupoyt
+Licensed under the GNU Affero General Public License v3.0 only
+(SPDX: AGPL-3.0-only). See LICENSE for the full text.
+
+This project is a port of **LearnHarness** by Amos Blomqvist
+(https://github.com/amosblomqvist/learnharness), licensed AGPL-3.0-only.
+The teaching methodology, session loop (measure, plan, teach, practice),
+question mechanics, knowledge-graph extraction pipeline, prompt doctrine,
+and interaction design originate from LearnHarness and are reused here
+under the terms of the GNU AGPL v3.0. Code is reimplemented for the
+DeepSeek Harness plugin API rather than copied where the original depended
+on its own framework stack; the pure domain core (graph merger and
+simplification, coverage fingerprints, plan-tree parsing, phase folding,
+question grading) is ported from the original source.
+
+## Attribution requirements
+
+If you redistribute this software (in source or, per AGPL section 13, as a
+network service), you must preserve this notice and keep the work available
+under AGPL-3.0-only, including the attribution above.
+
+## Dependencies and license notes
+
+- `@deepseek-ai/*` packages (cordis, dsh-llm, dsh-tools, dsh-session,
+  dsh-agent, dsh-host-webserver, dsh-client-ui-slots, and the rest of the
+  DeepSeek Harness runtime) - MIT. The harness itself is not distributed
+  with this plugin; it is a peer provided by the user's DeepSeek Harness
+  installation.
+- `d3-force` - ISC.
+- LearnHarness's own dependencies (pi-ai, streamdown, mermaid, katex,
+  Electron, and its provider stack) are intentionally NOT carried over;
+  the harness replaces them.
+
+No bundled dependency conflicts with AGPL-3.0-only were found at the time
+of writing. If you add a dependency, re-check its license against
+AGPL-3.0 compatibility before shipping.

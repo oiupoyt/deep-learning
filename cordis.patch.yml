@@ -1,0 +1,7 @@
+# deep-learning bundle patch
+#
+# One row: the plugin itself. Later layers (the profile's cordis.patch.yml)
+# may override its config by this id.
+- insert:
+    - id: deep-learning
+      name: 'deep-learning'
