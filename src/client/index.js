@@ -45,7 +45,6 @@ export function apply(ctx) {
         registerSettingsSection(slots, API);
     });
 }
-export default apply;
 /** The sidebar's panel icon: a square minimal glyph (no icon library). */
 function PanelIcon(_props) {
     return { className: "dl-panel-icon", children: "◆" };

@@ -38,7 +38,7 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test \"lib/tests/*.test.js\"",
+    "test": "node --test \"lib/tests/tests/*.test.js\"",
     "check": "npm run typecheck && npm run build && npm test"
   },
   "dsh": {

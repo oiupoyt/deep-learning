@@ -60,7 +60,10 @@ export function apply(ctx: unknown): void {
 	});
 }
 
-export default apply;
+// No `export default`: the browser loader resolve prefers `exports.default`,
+// and the bare `apply` function carries no inject — the client fiber would
+// activate with an empty declaration and any `ctx.slots` access would throw
+// ("cannot get property \"slots\" without inject"). Named exports only.
 
 // ─── minimal slot surface typing (structural — the host owns the real one) ──
 

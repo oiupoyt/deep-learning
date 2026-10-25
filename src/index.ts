@@ -604,4 +604,7 @@ function toHostTool(
 	} as never;
 }
 
-export default apply;
+// No `export default`: the DSH loader resolve prefers `exports.default` over
+// the module face, and a bare function drops the exported `inject` list —
+// the plugin would activate with an empty service declaration. Named exports
+// only (same contract as dsh-doublecheck and the other bundled plugins).

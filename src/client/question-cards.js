@@ -20,6 +20,10 @@ export function registerQuestionCards(slots, api) {
         slots.inject("tool.call.toolview", () => slots.register({
             name: "tool.call.toolview",
             key: tool,
+            // ask_user_question shadows the harness core's built-in row (same
+            // key, registered at priority 0): the keyed slot elects the
+            // lowest-priority cell, so -1 wins.
+            priority: tool === "ask_user_question" ? -1 : undefined,
             locale: "deepLearning",
             inject: () => ({ apiRoot: api, toolName: tool }),
         }, ToolCard));
