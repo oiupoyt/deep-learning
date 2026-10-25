@@ -42,7 +42,7 @@ function usePending(api) {
         const sessionId = sessionIdOf();
         if (!sessionId)
             return;
-        fetch(`${api}/question/${sessionId}`)
+        fetch(`${api}/question?session=${encodeURIComponent(sessionId)}`)
             .then((r) => r.json())
             .then((data) => {
             if (!cancelled)
@@ -58,10 +58,10 @@ function usePending(api) {
         if (!sessionId)
             return null;
         try {
-            const r = await fetch(`${api}/question/${sessionId}/answer`, {
+            const r = await fetch(`${api}/question`, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify(request),
+                body: JSON.stringify({ session: sessionId, ...request }),
             });
             const data = (await r.json());
             return data;

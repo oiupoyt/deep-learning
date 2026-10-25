@@ -74,7 +74,7 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 			setStatus("saving…");
 			try {
 				const r = await fetch(`${api}/settings`, {
-					method: "PUT",
+					method: "POST",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(next),
 				});

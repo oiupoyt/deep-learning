@@ -79,7 +79,7 @@ function usePending(api: string): {
 		let cancelled = false;
 		const sessionId = sessionIdOf();
 		if (!sessionId) return;
-		fetch(`${api}/question/${sessionId}`)
+		fetch(`${api}/question?session=${encodeURIComponent(sessionId)}`)
 			.then((r) => r.json())
 			.then((data: { question: ClientPending | null }) => {
 				if (!cancelled) setPending(data.question);
@@ -94,10 +94,10 @@ function usePending(api: string): {
 			const sessionId = sessionIdOf();
 			if (!sessionId) return null;
 			try {
-				const r = await fetch(`${api}/question/${sessionId}/answer`, {
+				const r = await fetch(`${api}/question`, {
 					method: "POST",
 					headers: { "content-type": "application/json" },
-					body: JSON.stringify(request),
+					body: JSON.stringify({ session: sessionId, ...request }),
 				});
 				const data = (await r.json()) as Record<string, unknown>;
 				return data;

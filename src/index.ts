@@ -36,6 +36,7 @@ import "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-tools";
 import "@deepseek-ai/dsh-system-prompt";
 import "@deepseek-ai/dsh-host-webserver";
+import "@deepseek-ai/dsh-client-connection";
 import "@deepseek-ai/dsh-web";
 import { FsGraphStore } from "./store/graph.js";
 import { FsSessionsStore, FsSettingsStore } from "./store/sessions.js";
@@ -470,76 +471,83 @@ export function apply(ctx: Context, _config: Config): void {
 		});
 	}, "deep-learning: tools");
 
-	// ── the web routes (the client bundle's API) ───────────────────────────
+	// ── the web routes (the client bundle's API, over the connection's
+	//    /api fetch-route registry — the browser-authenticated surface) ────
+
+	const json = (body: unknown, status = 200): Response =>
+		new Response(JSON.stringify(body), {
+			status,
+			headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+		});
 
 	ctx.effect(function* () {
-		yield ctx.webServer.register({
-			kind: "prefix",
-			path: "/api/deep-learning",
-			handler: async (req, res) => {
-				const url = new URL(req.url ?? "/", "http://localhost");
-				const route = url.pathname.replace(/\/+$/, "");
-				try {
-					// GET /api/deep-learning/question/:sessionId
-					const questionMatch = route.match(/^\/api\/deep-learning\/question\/([^/]+)$/);
-					if (req.method === "GET" && questionMatch) {
-						const state = states.get(questionMatch[1]!);
-						if (!state?.runtime) return json(res, 200, { question: null });
-						return json(res, 200, { question: state.runtime.pendingQuestion(questionMatch[1]!) });
-					}
-					// POST /api/deep-learning/question/:sessionId/answer
-					const answerMatch = route.match(/^\/api\/deep-learning\/question\/([^/]+)\/answer$/);
-					if (req.method === "POST" && answerMatch) {
-						const body = (await readJson(req)) as Record<string, unknown>;
-						const state = states.get(answerMatch[1]!);
-						if (!state?.runtime) return json(res, 409, { error: "no question pending" });
-						const ok = state.runtime.answerQuestion(answerMatch[1]!, body as never);
-						return json(res, ok ? 200 : 409, { ok });
-					}
-					// GET /api/deep-learning/graph — the snapshot (the ported
-					// /api/graph, minimal payload for the panel wave)
-					if (req.method === "GET" && route === "/api/deep-learning/graph") {
-						const { graphSnapshot } = await import("./server/snapshot.js");
-						return json(res, 200, graphSnapshot(graphStore, sessionsStore, ctx));
-					}
-					// POST /api/deep-learning/notes/import
-					if (req.method === "POST" && route === "/api/deep-learning/notes/import") {
-						const body = (await readJson(req)) as { text?: string; filePath?: string };
-						const text = typeof body.text === "string" ? body.text : "";
-						const filePath = typeof body.filePath === "string" && body.filePath.length > 0 ? body.filePath : "pasted.md";
-						const effective = resolveSettings(settingsStore.read());
-						const extractorRoute = effective.agent.models.extractor;
-						const auditorRoute = effective.agent.models.auditor;
-						if (!extractorRoute || !auditorRoute) {
-							return json(res, 503, { error: "extraction roles not configured — set the extractor/auditor models in Settings > Deep Learning" });
-						}
-						const { importNotes } = await import("./server/extraction.js");
-						const stats = await importNotes({
-							llm: ctx.llm as never as import("./server/roles.js").LlmLike,
-							extractor: { provider: extractorRoute.provider, model: extractorRoute.id },
-							auditor: { provider: auditorRoute.provider, model: auditorRoute.id },
-							filePath,
-							text,
-							store: graphStore,
-							chunkTokens: effective.graph.extractionChunkTokens,
-						});
-						return json(res, 200, { ok: true, nodes: stats.nodes, chains: stats.chains ?? 0 });
-					}
-					// GET /api/deep-learning/settings + PUT
-					if (req.method === "GET" && route === "/api/deep-learning/settings") {
-						return json(res, 200, { settings: settingsStore.read() });
-					}
-					if (req.method === "PUT" && route === "/api/deep-learning/settings") {
-						const body = (await readJson(req)) as UserSettings;
-						settingsStore.update(body);
-						// invalidate cached runtimes (settings revision moved)
-						for (const state of states.values()) state.runtimeSettings = "";
-						return json(res, 200, { ok: true });
-					}
-					return json(res, 404, { error: "not found" });
-				} catch (err) {
-					return json(res, 500, { error: err instanceof Error ? err.message : "internal" });
+		yield ctx.connection.fetch.register({
+			path: "/api/deep-learning/graph",
+			methods: ["GET"],
+			requestBody: "buffered",
+			fetch: async (_request: Request) => {
+				const { graphSnapshot } = await import("./server/snapshot.js");
+				return json(graphSnapshot(graphStore, sessionsStore, ctx));
+			},
+		});
+		yield ctx.connection.fetch.register({
+			path: "/api/deep-learning/settings",
+			methods: ["GET", "POST"],
+			requestBody: "buffered",
+			fetch: async (request: Request) => {
+				if (request.method === "GET") return json({ settings: settingsStore.read() });
+				const body = (await request.json().catch(() => ({}))) as UserSettings;
+				settingsStore.update(body);
+				for (const state of states.values()) state.runtimeSettings = ""; // invalidate cached runtimes
+				return json({ ok: true });
+			},
+		});
+		yield ctx.connection.fetch.register({
+			path: "/api/deep-learning/question",
+			methods: ["GET", "POST"],
+			requestBody: "buffered",
+			fetch: async (request: Request) => {
+				const url = new URL(request.url);
+				if (request.method === "GET") {
+					const sessionId = url.searchParams.get("session");
+					if (!sessionId) return json({ error: "missing session" }, 400);
+					const state = states.get(sessionId);
+					return json({ question: state?.runtime ? state.runtime.pendingQuestion(sessionId) : null });
 				}
+				// POST: submit an answer { session, ...AnswerRequest }
+				const body = (await request.json().catch(() => null)) as (Record<string, unknown> & { session?: string }) | null;
+				if (!body?.session) return json({ error: "missing session" }, 400);
+				const state = states.get(body.session);
+				if (!state?.runtime) return json({ error: "no question pending" }, 409);
+				const ok = state.runtime.answerQuestion(body.session, body as never);
+				return ok ? json({ ok: true }) : json({ error: "no question pending" }, 409);
+			},
+		});
+		yield ctx.connection.fetch.register({
+			path: "/api/deep-learning/notes/import",
+			methods: ["POST"],
+			requestBody: "buffered",
+			fetch: async (request: Request) => {
+				const body = (await request.json().catch(() => ({}))) as { text?: string; filePath?: string };
+				const text = typeof body.text === "string" ? body.text : "";
+				const filePath = typeof body.filePath === "string" && body.filePath.length > 0 ? body.filePath : "pasted.md";
+				const effective = resolveSettings(settingsStore.read());
+				const extractorRoute = effective.agent.models.extractor;
+				const auditorRoute = effective.agent.models.auditor;
+				if (!extractorRoute || !auditorRoute) {
+					return json({ error: "extraction roles not configured — set the extractor/auditor models in Settings > Deep Learning" }, 503);
+				}
+				const { importNotes } = await import("./server/extraction.js");
+				const stats = await importNotes({
+					llm: ctx.llm as never as import("./server/roles.js").LlmLike,
+					extractor: { provider: extractorRoute.provider, model: extractorRoute.id },
+					auditor: { provider: auditorRoute.provider, model: auditorRoute.id },
+					filePath,
+					text,
+					store: graphStore,
+					chunkTokens: effective.graph.extractionChunkTokens,
+				});
+				return json({ ok: true, nodes: stats.nodes, chains: stats.chains ?? 0 });
 			},
 		});
 	}, "deep-learning: web routes");
@@ -559,31 +567,6 @@ function textOfContent(content: unknown): string {
 		.filter((c): c is { type: "text"; text: string } => (c as { type?: string }).type === "text")
 		.map((c) => c.text)
 		.join("\n");
-}
-
-function json(res: unknown, status: number, body: unknown): void {
-	const r = res as {
-		writeHead(status: number, headers: Record<string, string>): void;
-		end(body: string): void;
-	};
-	r.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-	r.end(JSON.stringify(body));
-}
-
-function readJson(req: unknown): Promise<unknown> {
-	const chunks: Buffer[] = [];
-	const r = req as { on(event: string, cb: (...args: unknown[]) => void): void };
-	return new Promise((resolve, reject) => {
-		r.on("data", (chunk) => chunks.push(chunk as Buffer));
-		r.on("end", () => {
-			try {
-				resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}"));
-			} catch (err) {
-				reject(err);
-			}
-		});
-		r.on("error", reject);
-	});
 }
 
 /** Adapt a SessionTool to the host ToolDefinition surface (a structural
