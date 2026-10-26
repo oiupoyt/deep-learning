@@ -29,7 +29,7 @@ export interface ClientPending {
 	needsReveal: boolean;
 }
 
-const QUESTION_TOOLS = ["probe", "quiz", "recall", "explain", "ask_user_question", "problem", "conclude", "plan_init", "probe_done"];
+const QUESTION_TOOLS = ["probe", "quiz", "recall", "explain"];
 
 export function registerQuestionCards(slots: SlotsLike, api: string): void {
 	ensureStyle();
@@ -43,10 +43,6 @@ export function registerQuestionCards(slots: SlotsLike, api: string): void {
 				{
 					name: "tool.call.toolview",
 					key: tool,
-					// ask_user_question shadows the harness core's built-in row (same
-					// key, registered at priority 0): the keyed slot elects the
-					// lowest-priority cell, so -1 wins.
-					priority: tool === "ask_user_question" ? -1 : undefined,
 					inject: () => ({ apiRoot: api, toolName: tool }),
 				},
 				ToolCard,
@@ -142,6 +138,25 @@ function DockCompanion(props: { apiRoot?: string } & Record<string, unknown>): R
 	const api = props.apiRoot ?? "/api/deep-learning";
 	const { pending, answer } = usePending(api);
 	if (pending === null) return null;
+	if (pending.tool === "problem") {
+		// A practice problem: the statement shows here; the learner works in
+		// the composer below (submissions arrive as messages, not answers).
+		return React.createElement(
+			"div",
+			{ className: "dl-q", "data-dl-dock": "true" },
+			React.createElement(
+				"div",
+				{ className: "dl-q-kind" },
+				React.createElement("span", { className: "dl-kind-active" }, "problem"),
+			),
+			React.createElement("div", { className: "dl-q-text" }, pending.question),
+			React.createElement(
+				"div",
+				{ style: { color: "#8d8d8d", fontSize: "12.5px", marginTop: 8 } },
+				"work in the composer — your thinking arrives as your answer",
+			),
+		);
+	}
 	return React.createElement(
 		"div",
 		{ "data-dl-dock": "true", style: { padding: "0 0 8px" } },

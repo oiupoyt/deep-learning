@@ -15,6 +15,7 @@ import { LearningPanel } from "./panel.js";
 import { registerQuestionCards } from "./question-cards.js";
 import { registerSettingsSection } from "./settings-section.js";
 import { ensureStyle } from "./styles.js";
+import * as React from "react";
 export const name = "deep-learning-client";
 /** Dual-face plugins declare the services they consume on the client. */
 export const inject = ["slots"];
@@ -116,7 +117,9 @@ export function apply(ctx) {
 }
 // No `export default`: the browser loader resolve prefers `exports.default`,
 // and the bare `apply` function carries no inject. Named exports only.
-/** The sidebar's panel icon: a quiet muted glyph (no icon library). */
+/** The sidebar's panel icon: a real React component (the slot factory
+ *  renders it with the host's React — a plain object return is ignored
+ *  and the row silently vanishes). */
 function PanelIcon(_props) {
-    return { className: "dl-panel-icon", children: "\u25C6" };
+    return React.createElement("span", { className: "dl-panel-icon" }, "\u25C6");
 }

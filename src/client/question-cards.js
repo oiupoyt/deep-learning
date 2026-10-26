@@ -11,7 +11,7 @@
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
 import { ConfidenceRail, CONFIDENCE_STOPS } from "./confidence-rail.js";
-const QUESTION_TOOLS = ["probe", "quiz", "recall", "explain", "ask_user_question", "problem", "conclude", "plan_init", "probe_done"];
+const QUESTION_TOOLS = ["probe", "quiz", "recall", "explain"];
 export function registerQuestionCards(slots, api) {
     ensureStyle();
     // The toolview cards: one keyed entry per teaching tool. The answer UI
@@ -21,10 +21,6 @@ export function registerQuestionCards(slots, api) {
         slots.inject("tool.call.toolview", () => slots.register({
             name: "tool.call.toolview",
             key: tool,
-            // ask_user_question shadows the harness core's built-in row (same
-            // key, registered at priority 0): the keyed slot elects the
-            // lowest-priority cell, so -1 wins.
-            priority: tool === "ask_user_question" ? -1 : undefined,
             inject: () => ({ apiRoot: api, toolName: tool }),
         }, ToolCard));
     }
@@ -102,6 +98,11 @@ function DockCompanion(props) {
     const { pending, answer } = usePending(api);
     if (pending === null)
         return null;
+    if (pending.tool === "problem") {
+        // A practice problem: the statement shows here; the learner works in
+        // the composer below (submissions arrive as messages, not answers).
+        return React.createElement("div", { className: "dl-q", "data-dl-dock": "true" }, React.createElement("div", { className: "dl-q-kind" }, React.createElement("span", { className: "dl-kind-active" }, "problem")), React.createElement("div", { className: "dl-q-text" }, pending.question), React.createElement("div", { style: { color: "#8d8d8d", fontSize: "12.5px", marginTop: 8 } }, "work in the composer — your thinking arrives as your answer"));
+    }
     return React.createElement("div", { "data-dl-dock": "true", style: { padding: "0 0 8px" } }, React.createElement(QuestionBody, { pending: pending, answer: answer }));
 }
 // ─── the question body (the card's content) ────────────────────────────────────
