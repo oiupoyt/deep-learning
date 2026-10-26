@@ -86,12 +86,15 @@ function SettingsSection(props) {
     const graph = record?.graph ?? {};
     const groups = catalog?.groups ?? [];
     const setPin = (key, field, value) => {
-        setRecord({
-            ...record,
-            models: {
-                ...models,
-                [key]: { provider: models[key]?.provider ?? "", id: models[key]?.id ?? "", [field]: value },
-            },
+        setRecord((prev) => {
+            const prevModels = (prev ?? record)?.models ?? models;
+            return {
+                ...(prev ?? record),
+                models: {
+                    ...prevModels,
+                    [key]: { provider: prevModels[key]?.provider ?? "", id: prevModels[key]?.id ?? "", [field]: value },
+                },
+            };
         });
     };
     const setPromptSwitch = (path, on) => {
@@ -116,9 +119,20 @@ function SettingsSection(props) {
             className: "dl-select",
             value: pinnedProvider,
             onChange: (e) => {
-                setPin(pin.key, "provider", e.target.value);
-                // A provider change invalidates the model pin.
-                setPin(pin.key, "id", "");
+                // One functional update: the provider changes AND the model
+                // pin resets (a stale snapshot must never win the batch).
+                const provider = e.target.value;
+                setRecord((prev) => {
+                    const prevRecord = prev ?? record;
+                    const prevModels = prevRecord?.models ?? models;
+                    return {
+                        ...prevRecord,
+                        models: {
+                            ...prevModels,
+                            [pin.key]: { provider, id: "" },
+                        },
+                    };
+                });
             },
         }, React.createElement("option", { value: "" }, "(unset)"), groups.map((g) => React.createElement("option", { key: g.id, value: g.id }, g.name))), React.createElement("select", {
             className: "dl-select",

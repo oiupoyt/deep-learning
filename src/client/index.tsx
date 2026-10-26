@@ -64,28 +64,48 @@ export function apply(ctx: unknown): void {
 	try {
 
 	slots.inject("main", function* () {
+		void fetch("/api/deep-learning/diag", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ at: Date.now(), kind: "main-callback" }),
+		}).catch(() => {});
 		yield slots.register(
 			{
 				name: "main",
 				key: "deep-learning",
-				locale: "deepLearning",
 				inject: () => ({ apiRoot: API }),
 			},
 			LearningPanel,
 		);
+		void fetch("/api/deep-learning/diag", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ at: Date.now(), kind: "main-registered" }),
+		}).catch(() => {});
 	});
-	slots.inject("sidebar.panellist", () =>
-		slots.register(
+	slots.inject("sidebar.panellist", () => {
+		// Diagnostic: did the parent ever invoke this registration callback?
+		void fetch("/api/deep-learning/diag", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ at: Date.now(), kind: "panellist-callback" }),
+		}).catch(() => {});
+		const dispose = slots.register(
 			{
 				name: "sidebar.panellist",
 				id: "deep-learning",
 				order: 30,
 				label: () => "Learn Mode",
-				locale: "deepLearning",
 			},
 			PanelIcon,
-		),
-	);
+		);
+		void fetch("/api/deep-learning/diag", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ at: Date.now(), kind: "panellist-registered" }),
+		}).catch(() => {});
+		return dispose;
+	});
 		registerQuestionCards(slots, API);
 		registerSettingsSection(slots, API);
 	} catch (err) {
