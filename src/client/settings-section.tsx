@@ -48,7 +48,6 @@ export function registerSettingsSection(slots: SlotsLike, api: string): void {
 				order: 45,
 				label: () => "Deep Learning",
 				icon: "book",
-				locale: "deepLearning",
 				inject: () => ({ apiRoot: api }),
 			},
 			SettingsSection,

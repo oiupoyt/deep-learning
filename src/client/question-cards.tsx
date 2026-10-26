@@ -47,7 +47,6 @@ export function registerQuestionCards(slots: SlotsLike, api: string): void {
 					// key, registered at priority 0): the keyed slot elects the
 					// lowest-priority cell, so -1 wins.
 					priority: tool === "ask_user_question" ? -1 : undefined,
-					locale: "deepLearning",
 					inject: () => ({ apiRoot: api, toolName: tool }),
 				},
 				ToolCard,
@@ -63,7 +62,6 @@ export function registerQuestionCards(slots: SlotsLike, api: string): void {
 				name: "conversation.composer.dock",
 				id: "deep-learning-question",
 				order: 20,
-				locale: "deepLearning",
 				inject: () => ({ apiRoot: api }),
 			},
 			DockCompanion,
