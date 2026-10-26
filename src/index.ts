@@ -575,21 +575,39 @@ export function apply(ctx: Context, _config: Config): void {
 						}
 					},
 			});
-		yield scoped.connection.fetch.register({
+		const diagLog: unknown[] = [];
+	yield scoped.connection.fetch.register({
+		path: "/api/deep-learning/diag",
+		methods: ["GET", "POST"],
+		requestBody: "buffered",
+		fetch: async (request: Request) => {
+			if (request.method === "GET") return json({ log: diagLog.slice(-50) });
+			const body = await request.json().catch(() => ({}));
+			diagLog.push(body);
+			return json({ ok: true });
+		},
+	});
+yield scoped.connection.fetch.register({
 				path: "/api/deep-learning/models",
 				methods: ["GET"],
 				requestBody: "buffered",
 				fetch: async () => {
 					// The harness's own live catalog - providers + models for the
 					// settings dropdowns (the Models page's source, same API).
-					const mod = (await import(
-						"@deepseek-ai/dsh-api-session-controller" as string
-					).catch(() => undefined)) as { buildModelCatalog?: unknown } | undefined;
-					if (!mod || typeof mod.buildModelCatalog !== "function") {
-						return json({ error: "model catalog unavailable" }, 503);
+					try {
+						// sessionController.modelCatalog(): the same typed call
+						// the Models page makes — the service owns its injects.
+						const controller = scoped.get("sessionController") as {
+							modelCatalog?(): Promise<unknown>;
+						} | undefined;
+						if (!controller || typeof controller.modelCatalog !== "function") {
+							return json({ error: "model catalog unavailable" }, 503);
+						}
+						const catalog = await controller.modelCatalog();
+						return json(catalog);
+					} catch (err) {
+						return json({ error: err instanceof Error ? err.message : String(err) }, 500);
 					}
-					const catalog = await (mod.buildModelCatalog as (ctx: unknown, def?: unknown) => Promise<unknown>)(scoped);
-					return json(catalog);
 				},
 			});
 			yield scoped.connection.fetch.register({

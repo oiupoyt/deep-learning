@@ -11,12 +11,10 @@
 
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
+import type { SlotsLike } from "./slots-types.js";
 import { ConfidenceRail, CONFIDENCE_STOPS } from "./confidence-rail.js";
 
-interface SlotsLike {
-	inject(slot: string, setup: () => unknown): void;
-	register(options: Record<string, unknown>, component: unknown): () => void;
-}
+
 
 /** One client-facing pending question (the server's ClientPending). */
 export interface ClientPending {

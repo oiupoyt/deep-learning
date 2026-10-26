@@ -19,11 +19,9 @@
 
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
+import type { SlotsLike } from "./slots-types.js";
 
-interface SlotsLike {
-	inject(slot: string, setup: () => unknown): void;
-	register(options: Record<string, unknown>, component: unknown): () => void;
-}
+
 
 const SLOTS: Array<{ key: string; label: string; note: string }> = [
 	{ key: "strong", label: "strong slot", note: "the conversation default tier" },
