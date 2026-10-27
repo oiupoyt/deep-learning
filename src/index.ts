@@ -154,12 +154,17 @@ export function apply(ctx: Context, _config: Config): void {
 			queueMessage: async (text: string) => {
 				const controller = ctx.get("sessionController");
 				if (!controller) return;
-				await controller.prompt({
-					sessionId: sessionId as never,
-					mode: "queue",
-					content: [{ type: "text", text }],
-					requestId: `dl-${sessionId}-${Date.now()}` as never,
-				});
+				await (controller as unknown as {
+					prompt(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+				}).prompt(
+					{
+						sessionId: sessionId as never,
+						mode: "queue",
+						content: [{ type: "text", text }],
+						requestId: `dl-${sessionId}-${Date.now()}` as never,
+					},
+					new AbortController().signal,
+				);
 			},
 			listModelPins: () => settingsStore.read()?.models ?? ({} as never),
 			runRole: async (role, input, signal) => {
@@ -564,7 +569,9 @@ export function apply(ctx: Context, _config: Config): void {
 								content: [{ type: "text", text: `${marker}\n${goal}` }],
 								requestId: `dl-${sessionId}-${Date.now()}`,
 							},
-							undefined,
+							// The controller calls signal.throwIfAborted() — a real
+							// signal is required, never undefined.
+							new AbortController().signal,
 						).catch(() => {
 							// The prompt is queued best-effort; the learner can send
 							// it themselves if this path failed.

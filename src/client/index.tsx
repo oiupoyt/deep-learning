@@ -13,6 +13,7 @@
  */
 
 import { LearningPanel } from "./panel.js";
+import { PanelErrorBoundary } from "./boundary.js";
 import { registerQuestionCards } from "./question-cards.js";
 import { registerSettingsSection } from "./settings-section.js";
 import { ensureStyle } from "./styles.js";
@@ -76,7 +77,9 @@ export function apply(ctx: unknown): void {
 				key: "deep-learning",
 				inject: () => ({ apiRoot: API }),
 			},
-			LearningPanel,
+			function BoundedPanel(props: Record<string, unknown>) {
+				return React.createElement(PanelErrorBoundary, null, React.createElement(LearningPanel, props));
+			},
 		);
 		void fetch("/api/deep-learning/diag", {
 			method: "POST",
@@ -130,6 +133,17 @@ export function apply(ctx: unknown): void {
 /** The sidebar's panel icon: a real React component (the slot factory
  *  renders it with the host's React — a plain object return is ignored
  *  and the row silently vanishes). */
-function PanelIcon(_props: unknown): React.ReactElement {
-	return React.createElement("span", { className: "dl-panel-icon" }, "\u25C6");
+function PanelIcon(props: { size?: number } & Record<string, unknown>): React.ReactElement {
+	// A sized, centered box matching the row's glyph slot (the other entries
+	// render sized icon primitives; a bare inline glyph shifts alignment).
+	const size = typeof props.size === "number" ? props.size : 18;
+	return React.createElement(
+		"span",
+		{
+			className: "dl-panel-icon",
+			style: { width: `${size}px`, height: `${size}px`, display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: `${Math.round(size * 0.83)}px`, lineHeight: 1 },
+			"aria-hidden": "true",
+		},
+		"\u25C6",
+	);
 }

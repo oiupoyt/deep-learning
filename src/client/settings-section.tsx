@@ -8,34 +8,29 @@
  *     pdf reader / extractor / auditor): a specific model for one role;
  *     unset falls back to its slot.
  *
- * Every pin is a provider + model DROPDOWN pair, fed by the harness's
- * own live model catalog (GET /api/deep-learning/models — the same
- * buildModelCatalog the Models page uses). BYOK law: nothing is
- * hardcoded; absent pins read as unset.
- *
- * Also: the quizzing mechanic, the extraction chunk budget, and the
- * prompt override switches.
+ * Every pin is a provider + model DROPDOWN pair fed by the harness's
+ * live catalog (GET /api/deep-learning/models). BYOK law: nothing is
+ * hardcoded; absent pins read as unset. Renders with dl-root so the
+ * LH token skin applies (also hoisted at :root for standalone mounts).
  */
 
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
 import type { SlotsLike } from "./slots-types.js";
 
-
-
-const SLOTS: Array<{ key: string; label: string; note: string }> = [
-	{ key: "strong", label: "strong slot", note: "the conversation default tier" },
-	{ key: "cheap", label: "cheap slot", note: "research, demo building, extraction" },
-	{ key: "vision", label: "vision slot", note: "figures and PDF reading" },
+const SLOTS: Array<{ key: string; label: string }> = [
+	{ key: "strong", label: "strong slot" },
+	{ key: "cheap", label: "cheap slot" },
+	{ key: "vision", label: "vision slot" },
 ];
 
-const OVERRIDES: Array<{ key: string; label: string; note: string }> = [
-	{ key: "researcher", label: "researcher override", note: "web research briefs" },
-	{ key: "demoBuilder", label: "demo builder override", note: "interactive teaching instruments" },
-	{ key: "visualMaker", label: "visual maker override", note: "precise SVG figures" },
-	{ key: "pdfReader", label: "pdf reader override", note: "cited PDF briefs" },
-	{ key: "extractor", label: "extractor override", note: "graph extraction from teaching" },
-	{ key: "auditor", label: "auditor override", note: "identity verdicts for the merge" },
+const OVERRIDES: Array<{ key: string; label: string }> = [
+	{ key: "researcher", label: "researcher override" },
+	{ key: "demoBuilder", label: "demo builder override" },
+	{ key: "visualMaker", label: "visual maker override" },
+	{ key: "pdfReader", label: "pdf reader override" },
+	{ key: "extractor", label: "extractor override" },
+	{ key: "auditor", label: "auditor override" },
 ];
 
 export function registerSettingsSection(slots: SlotsLike, api: string): void {
@@ -48,7 +43,6 @@ export function registerSettingsSection(slots: SlotsLike, api: string): void {
 				order: 45,
 				label: () => "Deep Learning",
 				icon: "book",
-				inject: () => ({ apiRoot: api }),
 			},
 			SettingsSection,
 		),
@@ -80,7 +74,7 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 	const [status, setStatus] = React.useState<string | null>(null);
 	const [busy, setBusy] = React.useState(false);
 
-	const load = React.useCallback(() => {
+	React.useEffect(() => {
 		fetch(`${api}/settings`)
 			.then((r) => r.json())
 			.then((data: { settings: SettingsRecord | null }) => setRecord(data.settings))
@@ -90,10 +84,6 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 			.then((data: ModelCatalog) => setCatalog(data))
 			.catch(() => setCatalog(null));
 	}, [api]);
-
-	React.useEffect(() => {
-		load();
-	}, [load]);
 
 	const save = React.useCallback(
 		async (next: SettingsRecord) => {
@@ -122,33 +112,26 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 	const graph = record?.graph ?? {};
 	const groups = catalog?.groups ?? [];
 
-	const setPin = (key: string, field: "provider" | "id", value: string) => {
+	/** One functional update over the live state (never a stale snapshot). */
+	const updateModels = (key: string, patch: { provider?: string; id?: string }) => {
 		setRecord((prev) => {
-			const prevModels = (prev ?? record)?.models ?? models;
+			const base = prev ?? {};
+			const prevModels = base.models ?? {};
 			return {
-				...(prev ?? record),
+				...base,
 				models: {
 					...prevModels,
-					[key]: { provider: prevModels[key]?.provider ?? "", id: prevModels[key]?.id ?? "", [field]: value },
+					[key]: {
+						provider: patch.provider !== undefined ? patch.provider : prevModels[key]?.provider ?? "",
+						id: patch.id !== undefined ? patch.id : prevModels[key]?.id ?? "",
+					},
 				},
 			};
 		});
 	};
-	const setPromptSwitch = (path: string, on: boolean) => {
-		setRecord({
-			...record,
-			agent: { ...record?.agent, prompts: { ...prompts, [path]: on } },
-		});
-	};
-	const setMechanic = (free: boolean) => {
-		setRecord({
-			...record,
-			agent: { ...record?.agent, tools: { ...agentTools, explain: free } },
-		});
-	};
 
 	/** One pin row: label + provider dropdown + model dropdown. */
-	const pinRow = (pin: { key: string; label: string; note: string }): React.ReactElement => {
+	const pinRow = (pin: { key: string; label: string }): React.ReactElement => {
 		const pinnedProvider = models[pin.key]?.provider ?? "";
 		const pinnedModel = models[pin.key]?.id ?? "";
 		const providerGroup = groups.find((g) => g.id === pinnedProvider);
@@ -162,22 +145,9 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 				{
 					className: "dl-select",
 					value: pinnedProvider,
-					onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
-						// One functional update: the provider changes AND the model
-						// pin resets (a stale snapshot must never win the batch).
-						const provider = e.target.value;
-						setRecord((prev) => {
-							const prevRecord = prev ?? record;
-							const prevModels = prevRecord?.models ?? models;
-							return {
-								...prevRecord,
-								models: {
-									...prevModels,
-									[pin.key]: { provider, id: "" },
-								},
-							};
-						});
-					},
+					onChange: (e: React.ChangeEvent<HTMLSelectElement>) =>
+						// Provider changes AND the model pin resets — one update.
+						updateModels(pin.key, { provider: e.target.value, id: "" }),
 				},
 				React.createElement("option", { value: "" }, "(unset)"),
 				groups.map((g) => React.createElement("option", { key: g.id, value: g.id }, g.name)),
@@ -188,7 +158,7 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 					className: "dl-select",
 					value: pinnedModel,
 					disabled: pinnedProvider === "",
-					onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setPin(pin.key, "id", e.target.value),
+					onChange: (e: React.ChangeEvent<HTMLSelectElement>) => updateModels(pin.key, { id: e.target.value }),
 				},
 				React.createElement("option", { value: "" }, "(follows slot)"),
 				modelChoices.map((m) => React.createElement("option", { key: m.id, value: m.id }, m.name)),
@@ -196,101 +166,167 @@ function SettingsSection(props: { apiRoot?: string } & Record<string, unknown>):
 		);
 	};
 
+	/** One settings group: heading + note + body in a hairline card. */
+	const section = (heading: string, body: React.ReactElement, note?: string): React.ReactElement =>
+		React.createElement(
+			"div",
+			{
+				style: {
+					border: "1px solid var(--dl-border, #434343)",
+					borderRadius: "12px",
+					background: "var(--dl-card, #1c1c1c)",
+					padding: "14px 16px",
+				},
+			},
+			React.createElement(
+				"h3",
+				{ style: { color: "var(--dl-muted, #8d8d8d)", fontSize: "12.5px", fontWeight: 500, marginBottom: note ? 4 : 10 } },
+				heading,
+			),
+			note !== undefined &&
+				React.createElement("div", { style: { color: "var(--dl-muted, #8d8d8d)", fontSize: "12px", marginBottom: 10 } }, note),
+			body,
+		);
+
+	const button = (text: string, onClick: () => void, active: boolean, key?: string): React.ReactElement =>
+		React.createElement(
+			"button",
+			{
+				key,
+				className: "dl-mode",
+				"data-on": active ? "true" : "false",
+				onClick,
+				style: {
+					flex: 1,
+					padding: "9px 0",
+					textAlign: "center",
+					cursor: "pointer",
+					border: "1px solid var(--dl-border, #434343)",
+					borderRadius: "var(--dl-radius-md, 8px)",
+					background: "var(--dl-card, #1c1c1c)",
+					color: active ? "var(--dl-foreground, #e6e6e6)" : "var(--dl-muted, #8d8d8d)",
+					fontFamily: "inherit",
+					fontSize: 13,
+				},
+			},
+			text,
+		);
+
 	return React.createElement(
 		"div",
-		{ className: "dl-settings" },
-		React.createElement("h3", null, "model slots"),
-		groups.length === 0 &&
-			React.createElement("div", { className: "dl-pin-note" }, "model catalog unavailable — configure a provider on the Models page first"),
-		SLOTS.map(pinRow),
-		React.createElement("h3", null, "optional overrides"),
-		React.createElement(
-			"div",
-			{ className: "dl-pin-note" },
-			"An override names the model for one role; unset roles follow their slot (research/demo/extraction follow cheap, figures/PDFs follow vision).",
-		),
-		OVERRIDES.map(pinRow),
-		React.createElement("h3", null, "quizzing mechanic"),
-		React.createElement(
-			"div",
-			{ className: "dl-mode-row", style: { maxWidth: 360 } },
+		{ className: "dl-settings dl-root" },
+		section(
+			"model slots",
 			React.createElement(
-				"button",
-				{
-					className: "dl-mode",
-					"data-on": agentTools.explain !== true ? "true" : "false",
-					onClick: () => setMechanic(false),
-				},
-				"multiple choice",
+				"div",
+				null,
+				groups.length === 0
+					? React.createElement(
+							"div",
+							{ className: "dl-pin-note" },
+							"model catalog unavailable — configure a provider on the Models page first",
+						)
+					: SLOTS.map(pinRow),
 			),
+			"the default tiers roles fall back to: strong = conversation default, cheap = research/demo/extraction, vision = figures/PDFs",
+		),
+		section(
+			"optional overrides",
+			React.createElement("div", null, OVERRIDES.map(pinRow)),
+			"unset roles follow their slot; an override names the exact model for one role",
+		),
+		section(
+			"quizzing mechanic",
 			React.createElement(
-				"button",
-				{
-					className: "dl-mode",
-					"data-on": agentTools.explain === true ? "true" : "false",
-					onClick: () => setMechanic(true),
-				},
-				"free recall",
+				"div",
+				{ style: { display: "flex", gap: 8, maxWidth: 360 } },
+				button("multiple choice", () => setRecord((prev) => ({ ...(prev ?? {}), agent: { ...(prev ?? {}).agent, tools: { ...(prev ?? {})?.agent?.tools, explain: false } } })), agentTools.explain !== true),
+				button("free recall", () => setRecord((prev) => ({ ...(prev ?? {}), agent: { ...(prev ?? {}).agent, tools: { ...(prev ?? {})?.agent?.tools, explain: true } } })), agentTools.explain === true),
 			),
 		),
-		React.createElement("h3", null, "extraction"),
-		React.createElement(
-			"div",
-			{ className: "dl-pin-row", style: { gridTemplateColumns: "190px 1fr" } },
-			React.createElement("span", { className: "dl-pin-label" }, "chunk budget (tokens per batch, floor 500)"),
-			React.createElement("input", {
-				className: "dl-input",
-				type: "number",
-				value: graph.extractionChunkTokens ?? 4096,
-				onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
-					setRecord({
-						...record,
-						graph: { ...graph, extractionChunkTokens: Number(e.target.value) },
-					}),
-			}),
+		section(
+			"extraction",
+			React.createElement(
+				"div",
+				{ style: { display: "grid", gridTemplateColumns: "240px 1fr", gap: 8, alignItems: "center" } },
+				React.createElement("span", { className: "dl-pin-label" }, "chunk budget (tokens per batch, floor 500)"),
+				React.createElement("input", {
+					className: "dl-input",
+					type: "number",
+					value: graph.extractionChunkTokens ?? 4096,
+					onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
+						setRecord((prev) => ({
+							...(prev ?? {}),
+							graph: { ...(prev ?? {})?.graph, extractionChunkTokens: Number(e.target.value) },
+						})),
+				}),
+			),
 		),
-		React.createElement("h3", null, "prompt overrides"),
-		React.createElement(
-			"div",
-			null,
+		section(
+			"prompt overrides",
 			Object.keys(prompts).length === 0
 				? React.createElement(
 						"div",
 						{ className: "dl-pin-note" },
 						"no override switches yet — edit a segment file under ~/.dsh/deep-learning/prompts/ and add its switch here",
 					)
-				: Object.entries(prompts).map(([path, on]) =>
-						React.createElement(
-							"div",
-							{ key: path, className: "dl-seg-row" },
-							React.createElement("span", { className: "dl-seg-name" }, path),
+				: React.createElement(
+						"div",
+						null,
+						Object.entries(prompts).map(([path, on]) =>
 							React.createElement(
-								"button",
-								{
-									className: "dl-btn",
-									"data-on": on ? "true" : "false",
-									onClick: () => setPromptSwitch(path, !on),
-								},
-								on ? "override on" : "override off",
+								"div",
+								{ key: path, className: "dl-seg-row" },
+								React.createElement("span", { className: "dl-seg-name" }, path),
+								React.createElement(
+									"button",
+									{
+										className: "dl-btn",
+										"data-on": on ? "true" : "false",
+										onClick: () =>
+											setRecord((prev) => ({
+												...(prev ?? {}),
+												agent: {
+													...(prev ?? {}).agent,
+													prompts: { ...(prev ?? {})?.agent?.prompts, [path]: !on },
+												},
+											})),
+									},
+									on ? "override on" : "override off",
+								),
 							),
 						),
 					),
 		),
 		React.createElement(
 			"div",
-			null,
+			{ style: { display: "flex", alignItems: "center", gap: 12, marginTop: 4 } },
 			React.createElement(
 				"button",
 				{
 					className: "dl-btn",
 					disabled: busy,
 					onClick: () => record !== null && void save(record),
+					style: {
+						padding: "8px 20px",
+						fontSize: 13,
+						border: "1px solid var(--dl-border, #434343)",
+						borderRadius: "var(--dl-radius-md, 8px)",
+						background: "var(--dl-card, #1c1c1c)",
+						color: "var(--dl-foreground, #e6e6e6)",
+						cursor: "pointer",
+						fontFamily: "inherit",
+					},
 				},
 				busy ? "saving…" : "save settings",
 			),
 			React.createElement(
 				"span",
-				{ className: "dl-status", "data-err": status?.includes("fail") ? "true" : "false", style: { marginLeft: 12 } },
+				{
+					className: "dl-status",
+					"data-err": status !== null && status.includes("fail") ? "true" : "false",
+					style: { color: status !== null && status.includes("fail") ? "#ef4444" : "var(--dl-muted, #8d8d8d)", fontSize: "12.5px" },
+				},
 				status,
 			),
 		),

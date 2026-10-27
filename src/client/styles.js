@@ -18,7 +18,10 @@ export function ensureStyle() {
     style.textContent = `
 /* deep-learning — the LearnHarness skin (ported tokens) */
 .dl-root, .dl-root * { box-sizing: border-box; margin: 0; padding: 0; }
-.dl-root {
+/* The token block ALSO at :root level: settings/toolview surfaces render
+   OUTSIDE .dl-root (the harness hosts them directly), where .dl-root's
+   custom properties would resolve to nothing — invisible buttons. */
+:root, .dl-root {
 	--dl-background: #141414;
 	--dl-foreground: #e6e6e6;
 	--dl-card: #1c1c1c;

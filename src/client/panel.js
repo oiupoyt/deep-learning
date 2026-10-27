@@ -191,14 +191,16 @@ function GraphCanvas({ snapshot }) {
 }
 // ─── the chain table ──────────────────────────────────────────────────────────
 function ChainTable({ snapshot }) {
-    const rows = (snapshot?.chains ?? [])
+    const chains = (snapshot?.chains ?? []).filter((c) => c !== null && typeof c === "object" && Array.isArray(c.premises) && typeof c.conclusion === "string");
+    const propositions = (snapshot?.propositions ?? []).filter((n) => n != null);
+    const rows = chains
         .map((chain) => {
-        const names = (snapshot?.propositions ?? []).filter((n) => chain.premises.includes(n.id) || chain.conclusion === n.id);
+        const names = propositions.filter((n) => chain.premises.includes(n.id) || chain.conclusion === n.id);
         const nameOf = (id) => names.find((n) => n.id === id)?.name ?? id;
         return {
-            id: chain.id,
+            id: chain.id ?? "",
             line: `${[...chain.premises].sort().map(nameOf).join(", ")} → ${nameOf(chain.conclusion)}`,
-            provenance: chain.provenance.map((pt) => snapshot?.sessions[pt.chatId] ?? snapshot?.fileSources[pt.chatId] ?? pt.chatId),
+            provenance: (Array.isArray(chain.provenance) ? chain.provenance : []).map((pt) => snapshot?.sessions?.[pt?.chatId ?? ""] ?? snapshot?.fileSources?.[pt?.chatId ?? ""] ?? pt?.chatId ?? ""),
         };
     })
         .sort((a, b) => a.id.localeCompare(b.id));
