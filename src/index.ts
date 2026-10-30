@@ -32,13 +32,16 @@ import type { Context } from "@deepseek-ai/cordis";
 // `ctx.webServer` extensions to cordis's interfaces).
 import "@deepseek-ai/cordis";
 import "@deepseek-ai/dsh-session";
+import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import "@deepseek-ai/dsh-agent";
+import type { Agent } from "@deepseek-ai/dsh-agent";
 import "@deepseek-ai/dsh-tools";
 import "@deepseek-ai/dsh-system-prompt";
 import "@deepseek-ai/dsh-host-webserver";
 import "@deepseek-ai/dsh-client-connection";
 import "@deepseek-ai/dsh-web";
 import { FsGraphStore } from "./store/graph.js";
+import { FsArtifactStore, artifactInputFromRoleResult } from "./store/artifacts.js";
 import { FsSessionsStore, FsSettingsStore } from "./store/sessions.js";
 import { createTeachingRuntime, type TeachingRuntime, type HarnessSeam } from "./server/tools.js";
 import { composeInstructions } from "./server/prompts.js";
@@ -46,8 +49,19 @@ import { phaseAt, type PhaseEvent } from "./core/phases.js";
 import { derivePlanStatuses } from "./core/plan-tree.js";
 import { coverageOf, messageViewLines, type CoverageMessage } from "./core/coverage.js";
 import { resolveSettings } from "./core/settings.js";
+import {
+	appendLearningModeRecord,
+	readLearningModeState,
+	resolveLearningModeMutation,
+	INITIAL_LEARNING_MODE_STATE,
+	learningModeProjection,
+	reduceLearningMode,
+	type LearningModeState,
+} from "./core/learning-mode.js";
 import type { UserSettings } from "./core/settings.js";
 import type { PlanTree } from "./core/contracts/plan.js";
+import { concludesLearningToolTurn } from "./core/tool-turn.js";
+import { foldLearningSessionEvent, replayLearningSession, type ReplayFoldEvent } from "./core/session-replay.js";
 
 /** The plugin's data root: $DSH_HOME/deep-learning (plain inspectable files). */
 function dataRootOf(ctx: Context): string {
@@ -64,30 +78,18 @@ function await0(): { homedir(): string } {
 }
 
 /** The DSH session-event shapes the folds need. */
-interface FoldEvent {
-	type: string;
-	message?: {
-		role?: string;
-		content?: unknown;
-		source?: { kind?: string };
-		toolCallId?: string;
-		toolName?: string;
-		isError?: boolean;
-	};
-	turn?: number;
-	step?: number;
-	callId?: string;
-	name?: string;
-	arguments?: unknown;
-}
+type FoldEvent = ReplayFoldEvent;
 
 /** A per-session fold state maintained over the event stream. */
 interface SessionState {
 	sessionId: string;
 	kind: "teach" | "practice" | null;
-	phase: "probe" | "plan" | "teach";
+	learningMode: LearningModeState;
+	phase: "probe" | "plan" | "teach" | "practice";
 	/** Assistant messages in order, for phase/plan folds. */
 	events: FoldEvent[];
+	agent?: Agent;
+	toolDisposers?: Array<() => void>;
 	/** The live teaching runtime (tools + pending question). */
 	runtime?: TeachingRuntime;
 	runtimeKind?: "teach" | "practice";
@@ -98,7 +100,7 @@ interface SessionState {
 export const name = "deep-learning";
 
 /** Services the plugin waits for. */
-export const inject = ["llm", "systemPrompt", "tools", "webServer", "connection", "web", "sessions", "agents"];
+export const inject = ["llm", "systemPrompt", "tools", "webServer", "connection", "web", "sessions", "agents", "sessionProjections"];
 
 /** Plugin configuration (none yet — the settings delta is the record). */
 export interface Config {}
@@ -108,6 +110,7 @@ export function apply(ctx: Context, _config: Config): void {
 	const dataRoot = dataRootOf(ctx);
 	fs.mkdirSync(dataRoot, { recursive: true });
 	const graphStore = new FsGraphStore(dataRoot);
+	const artifactsStore = new FsArtifactStore(dataRoot);
 	const sessionsStore = new FsSessionsStore(dataRoot);
 	const settingsStore = new FsSettingsStore(dataRoot);
 
@@ -124,6 +127,7 @@ export function apply(ctx: Context, _config: Config): void {
 			state = {
 				sessionId,
 				kind: null,
+				learningMode: INITIAL_LEARNING_MODE_STATE,
 				phase: "probe",
 				events: [],
 				pendingQuestionSeen: false,
@@ -133,8 +137,26 @@ export function apply(ctx: Context, _config: Config): void {
 		return state;
 	};
 
-	/** Read the settings snapshot + build the session's runtime when the
-	 *  kind is known. Rebuilt when the settings record changed (the
+	/**
+	 * Restore the durable session fold before an agent receives input. Seed events
+	 * do not re-emit through session/event during resume, so this is the only
+	 * reliable place to reconstruct the process-local runtime state.
+	 */
+	const hydrateSession = (sessionId: string, events: readonly SessionEvent[]): SessionState => {
+		const state = stateOf(sessionId);
+		const replay = replayLearningSession(events);
+		state.kind = replay.kind;
+		state.learningMode = replay.learningMode;
+		state.phase = replay.phase;
+		state.events = replay.events;
+		state.runtime = undefined;
+		state.runtimeKind = undefined;
+		state.runtimeSettings = undefined;
+		state.pendingQuestionSeen = false;
+		return state;
+	};
+
+	/** Read the settings snapshot + build the session's runtime when the	 *  kind is known. Rebuilt when the settings record changed (the
 	 *  original's fresh-per-turn law, lazified to settings-revision). */
 	const runtimeOf = (sessionId: string, kind: "teach" | "practice"): TeachingRuntime => {
 		const state = stateOf(sessionId);
@@ -168,34 +190,26 @@ export function apply(ctx: Context, _config: Config): void {
 			},
 			listModelPins: () => settingsStore.read()?.models ?? ({} as never),
 			runRole: async (role, input, signal) => {
-				return runRoleJob(role, input, signal);
+				return runRoleJob(role, input, signal, sessionId);
 			},
 		};
-		const runtime = createTeachingRuntimeSync({ dataRoot, seam, settings: raw });
+		const runtime = createTeachingRuntime({ dataRoot, seam, settings: raw });
 		state.runtime = runtime;
 		state.runtimeKind = kind;
 		state.runtimeSettings = snapshot;
 		return runtime;
 	};
 
-	// createTeachingRuntime is async in the contract; the sync wrapper
-	// exists because the host wiring constructs runtimes eagerly. The
-	// promise resolves immediately (no awaits inside).
-	function createTeachingRuntimeSync(options: {
-		dataRoot: string;
-		seam: HarnessSeam;
-		settings: UserSettings | null;
-	}): TeachingRuntime {
-		let rt: TeachingRuntime | undefined;
-		void createTeachingRuntime(options).then((resolved) => {
-			rt = resolved;
-		});
-		// The factory performs no awaits before returning (see tools.ts);
-		// a microtask has not run yet at synchronous call sites, so this
-		// throws only if the contract changes.
-		if (!rt) throw new Error("runtime factory must resolve synchronously");
-		return rt;
-	}
+	const syncSessionTools = (state: SessionState): void => {
+		for (const dispose of state.toolDisposers ?? []) dispose();
+		state.toolDisposers = undefined;
+		const agent = state.agent;
+		if (!agent || state.kind === null) return;
+		const runtime = runtimeOf(state.sessionId, state.kind);
+		state.toolDisposers = Object.values(runtime.tools()).map((tool) =>
+			agent.ctx.tools.register(toHostTool(tool, () => runtime)),
+		);
+	};
 
 	/** The extraction trigger: fire-and-forget, single-flight per session.
 		 *  Failure checkpoints nothing — the next trigger re-runs (the ported law). */
@@ -240,7 +254,7 @@ export function apply(ctx: Context, _config: Config): void {
 		 *  settings pins (researcher/demoBuilder/visualMaker/pdfReader/
 		 *  extractor/auditor) — BYOK law, never hardcoded; an unset pin
 		 *  refuses honestly. */
-	async function runRoleJob(role: string, input: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+	async function runRoleJob(role: string, input: Record<string, unknown>, signal: AbortSignal, sessionId: string): Promise<unknown> {
 		const effective = resolveSettings(settingsStore.read());
 		const route = effective.agent.models[role as keyof typeof effective.agent.models];
 		if (!route) {
@@ -295,8 +309,11 @@ export function apply(ctx: Context, _config: Config): void {
 				title: input.title !== undefined ? String(input.title) : undefined,
 				signal,
 			};
-			if (role === "demo") return runDemoArtifact(options);
-			return runVisualArtifact(options);
+			const result = role === "demo" ? await runDemoArtifact(options) : await runVisualArtifact(options);
+			const inputArtifact = artifactInputFromRoleResult(sessionId, role, result);
+			if (!inputArtifact) throw new Error(`the ${role} role returned an invalid artifact`);
+			const artifact = artifactsStore.save(inputArtifact);
+			return { persisted: true, artifactId: artifact.id, kind: artifact.kind, title: artifact.title };
 		}
 		if (role === "pdf") {
 			const filePath = String(input.path ?? "");
@@ -324,111 +341,42 @@ export function apply(ctx: Context, _config: Config): void {
 	// Every registration resolves through ctx.inject: the plugin's apply
 	// owns nothing synchronously — the services arrive when the composition
 	// provides them (the harness's dependency semantics).
-	ctx.inject(["llm", "systemPrompt", "tools", "webServer", "connection", "web", "sessions", "agents"], (scoped) => {
+	ctx.inject(["llm", "systemPrompt", "tools", "webServer", "connection", "web", "sessions", "agents", "sessionProjections"], (scoped) => {
+		registerLearningModeProjection(scoped.sessionProjections);
 			// ── the session event fold (phases, kinds, coverage triggers) ─────────
 
 		scoped.effect(function* () {
-			yield scoped.on("session/event", (session, event: FoldEvent) => {
+			yield scoped.on("session/event", (session, event: SessionEvent) => {
 				const state = stateOf(session.id);
-				// Tool results: the message carries toolCallId; the fold keeps the
-				// paired call's name.
-				if (event.type === "tool/result") {
-					// The session event carries the message under `message`.
-					const toolMessage = (event as unknown as { message?: { toolCallId?: string; isError?: boolean } }).message;
-					if (toolMessage?.toolCallId) {
-						// resolve name from the paired call in the fold
-						const call = state.events.find((x) => x.type === "tool/call" && x.callId === toolMessage.toolCallId);
-						state.events.push({
-							type: "toolResult",
-							message: {
-								role: "toolResult",
-								toolName: call?.name,
-								isError: toolMessage.isError,
-							},
-						});
-					}
-					foldAdvance(state);
-					return;
+				const previousKind = state.kind;
+				const next = foldLearningSessionEvent(state, event);
+				state.kind = next.kind;
+				state.learningMode = next.learningMode;
+				state.phase = next.phase;
+				state.events = next.events;
+				if (state.kind !== previousKind) {
+					state.runtime = undefined;
+					state.runtimeKind = undefined;
+					state.runtimeSettings = undefined;
+					syncSessionTools(state);
 				}
-				if (event.type === "tool/call") {
-					state.events.push({
-						type: "tool/call",
-						callId: event.callId,
-						name: event.name,
-						arguments: event.arguments,
-					});
-					foldAdvance(state);
-					return;
-				}
-				if (event.type === "assistant/message" || event.type === "user/message") {
-					const message = (event as unknown as { message?: { role?: string; content?: unknown; source?: { kind?: string } } }).message;
-					if (!message) return;
-					state.events.push({
-						type: event.type,
-						message: {
-							role: message.role,
-							content: message.content,
-							source: message.source,
-						},
-					});
-					// The kind marker: a user message whose text starts with the
-					// deep-learning session-context preamble.
-					if (message.role === "user" && typeof message.content !== "undefined") {
-						const text = textOfContent(message.content);
-						if (text.startsWith("[deep-learning:")) {
-							state.kind = text.includes("practice") ? "practice" : "teach";
-						}
-					}
-					// Coverage: teacher prose only (assistant text blocks).
-					if (message.role === "assistant" && state.kind === "teach") {
-						maybeTriggerExtraction(state, session);
-					}
-					foldAdvance(state);
-					return;
-				}
-				if (event.type === "turn/end") {
-					foldAdvance(state);
-					return;
-				}
+				if (event.type === "assistant/message" && state.kind === "teach") maybeTriggerExtraction(state);
 			});
 		}, "deep-learning: session fold");
 
-		/** Re-derive the phase + plan statuses after each event. */
-		function foldAdvance(state: SessionState): void {
-			if (state.kind !== "teach") return;
-			const tree = sessionsStore.readTree(state.sessionId);
-			const phaseEvents: PhaseEvent[] = state.events.map((e) => {
-				if (e.type === "toolResult") {
-					return { role: "toolResult", toolName: e.message?.toolName, isError: e.message?.isError };
-				}
-				if (e.type === "tool/call") {
-					return { role: "assistant", toolCalls: [{ name: e.name ?? "", arguments: e.arguments }] };
-				}
-				return { role: e.message?.role };
-			});
-			state.phase = phaseAt(phaseEvents);
-		}
-
-		/** The extraction trigger: after a turn ends, when uncovered teacher
-		 *  prose crosses the chunk budget (the ported seam). */
-		function maybeTriggerExtraction(state: SessionState, _session: unknown): void {
+		function maybeTriggerExtraction(state: SessionState): void {
 			if (state.kind !== "teach") return;
 			const effective = resolveSettings(settingsStore.read());
 			if (!effective.graph.enabled) return;
 			const messages: CoverageMessage[] = state.events
 				.filter((e) => e.type === "assistant/message")
 				.map((e) => ({
-					id: (e as unknown as { message?: { id?: string } }).message?.id ?? `${e.type}-${state.events.indexOf(e)}`,
+					id: e.message?.id ?? e.type + "-" + state.events.indexOf(e),
 					role: "assistant",
 					content: e.message?.content,
 				}));
-			// Note: coverage ids derive from message ids; the DSH log provides
-			// them on the message. Absent ids use event positions (stable per
-			// fold order but never persisted twice).
 			const covered = coverageOf(messages, graphStore.readCoverage(), state.sessionId);
-			if (covered.uncoveredTokens >= effective.graph.extractionChunkTokens) {
-				void triggerExtraction(state);
-			}
+			if (covered.uncoveredTokens >= effective.graph.extractionChunkTokens) void triggerExtraction(state);
 		}
 
 		// ── the dynamic system prompt section ─────────────────────────────────
@@ -456,26 +404,14 @@ export function apply(ctx: Context, _config: Config): void {
 		// ── the tools registration (per-session scope, phase-gated) ───────────
 
 		scoped.effect(function* () {
-			// The runtime registry is keyed by session; tools register on the
-			// agent's creation and unregister on its disposal (global-scope
-			// registration: DSH tools.register registers on the calling fiber;
-			// per-agent scoping arrives with the plugin's own scope plumbing).
-			const toolDisposers = new Map<string, Array<() => void>>();
-			yield scoped.on("agent/created", ({ agent }) => {
-				const state = states.get(agent.id);
-				if (!state || state.kind === null) return;
-				const kind = state.kind;
-				const runtime = runtimeOf(agent.id, kind);
-				const disposers: Array<() => void> = [];
-				for (const tool of Object.values(runtime.tools())) {
-					disposers.push(scoped.tools.register(toHostTool(tool, () => runtime)));
-				}
-				toolDisposers.set(agent.id, disposers);
+			yield scoped.on("agent/created", async ({ agent }) => {
+				const state = hydrateSession(agent.id, agent.session.snapshotEvents());
+				state.agent = agent;
+				syncSessionTools(state);
 			});
 			yield scoped.on("agent/disposed", ({ agent }) => {
-				const disposers = toolDisposers.get(agent.id);
-				if (disposers) for (const dispose of disposers) dispose();
-				toolDisposers.delete(agent.id);
+				const state = states.get(agent.id);
+				for (const dispose of state?.toolDisposers ?? []) dispose();
 				states.delete(agent.id);
 			});
 		}, "deep-learning: tools");
@@ -497,6 +433,17 @@ export function apply(ctx: Context, _config: Config): void {
 				fetch: async (_request: Request) => {
 					const { graphSnapshot } = await import("./server/snapshot.js");
 					return json(graphSnapshot(graphStore, sessionsStore, ctx));
+				},
+			});
+			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/artifacts",
+				methods: ["GET"],
+				requestBody: "buffered",
+				fetch: async (request: Request) => {
+					const sessionId = new URL(request.url).searchParams.get("session");
+					if (!sessionId) return json({ error: "missing session" }, 400);
+					if (!scoped.sessions.get(sessionId as never)) return json({ error: "session unavailable" }, 404);
+					return json(artifactsStore.list(sessionId));
 				},
 			});
 			yield scoped.connection.fetch.register({
@@ -533,6 +480,29 @@ export function apply(ctx: Context, _config: Config): void {
 				},
 			});
 			yield scoped.connection.fetch.register({
+				path: "/api/deep-learning/mode",
+				methods: ["GET", "POST"],
+				requestBody: "buffered",
+				fetch: async (request: Request) => {
+					const url = new URL(request.url);
+					const incoming = request.method === "POST" ? await request.json().catch(() => null) : null;
+					const sessionId =
+						typeof incoming === "object" && incoming !== null && typeof (incoming as { session?: unknown }).session === "string"
+							? (incoming as { session: string }).session
+							: url.searchParams.get("session");
+					if (!sessionId) return json({ error: "missing session" }, 400);
+					const session = scoped.sessions.get(sessionId as never);
+					if (!session) return json({ error: "session unavailable" }, 404);
+					const current = readLearningModeState(scoped.sessionProjections, session);
+					if (request.method === "GET") return json({ state: current });
+					const next = resolveLearningModeMutation(current, incoming);
+					if (next === null) return json({ error: "provide enabled:boolean or toggle:true" }, 400);
+					if (next !== current) appendLearningModeRecord(session, next);
+					return json({ state: next });
+				},
+			});
+
+			yield scoped.connection.fetch.register({
 				path: "/api/deep-learning/session/start",
 				methods: ["POST"],
 				requestBody: "buffered",
@@ -551,6 +521,13 @@ export function apply(ctx: Context, _config: Config): void {
 							create(request: Record<string, unknown>): Promise<{ sessionId: string }>;
 						}).create({});
 						const sessionId = created.sessionId;
+						const session = scoped.sessions.get(sessionId as never);
+						if (!session) return json({ error: "created session unavailable" }, 503);
+						appendLearningModeRecord(session, {
+							enabled: true,
+							phase: mode === "practice" ? "practice" : "probe",
+							revision: 1,
+						});
 						// Mark the session in the list: the Learn Mode title badge.
 						const title = `[${mode === "practice" ? "Practice" : "Learn"}] ${goal.replace(/\s+/g, " ").trim().slice(0, 60)}`;
 						await (controller as {
@@ -582,18 +559,6 @@ export function apply(ctx: Context, _config: Config): void {
 						}
 					},
 			});
-		const diagLog: unknown[] = [];
-	yield scoped.connection.fetch.register({
-		path: "/api/deep-learning/diag",
-		methods: ["GET", "POST"],
-		requestBody: "buffered",
-		fetch: async (request: Request) => {
-			if (request.method === "GET") return json({ log: diagLog.slice(-50) });
-			const body = await request.json().catch(() => ({}));
-			diagLog.push(body);
-			return json({ ok: true });
-		},
-	});
 yield scoped.connection.fetch.register({
 				path: "/api/deep-learning/models",
 				methods: ["GET"],
@@ -649,6 +614,19 @@ yield scoped.connection.fetch.register({
 
 }
 
+type LearningModeProjectionRegistrar = (definition: typeof learningModeProjection) => () => void;
+
+/**
+ * dsh-session-projection 0.2.1-rc.4 declares the registry overload against
+ * its private ./types.ts module, while the public projection definition
+ * re-exports that table through the package root. The runtime contract is
+ * identical; keep the compatibility assertion at this package boundary.
+ */
+function registerLearningModeProjection(registry: { register: (...args: never[]) => () => void }): void {
+	const register = registry.register.bind(registry) as unknown as LearningModeProjectionRegistrar;
+	register(learningModeProjection);
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function promptsRootOf(): string {
@@ -690,7 +668,7 @@ function toHostTool(
 		},
 		// Teach questions and probe_done/problem poses conclude the turn:
 		// the learner answers outside the turn.
-		concludesTurn: ["probe_done", "problem"].includes(tool.name) || true,
+		concludesTurn: concludesLearningToolTurn(tool.name),
 	} as never;
 }
 
