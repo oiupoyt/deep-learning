@@ -18,15 +18,6 @@ export class PanelErrorBoundary extends React.Component<{ children: React.ReactE
 		return { error: err instanceof Error ? err.message : String(err) };
 	}
 
-	componentDidCatch(err: unknown): void {
-		// eslint-disable-next-line no-console
-		console.error("[deep-learning] panel crashed:", err);
-		void fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "panel-crash", message: err instanceof Error ? err.message : String(err) }),
-		}).catch(() => {});
-	}
 
 	render(): React.ReactElement {
 		if (this.state.error !== null) {

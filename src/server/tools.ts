@@ -20,6 +20,7 @@
 
 import { FsGraphStore } from "../store/graph.js";
 import { FsSessionsStore } from "../store/sessions.js";
+import { artifactCompletionText } from "./artifact-notice.js";
 import {
 	buildAnswer,
 	compactAnswerForModel,
@@ -123,7 +124,7 @@ export interface RuntimeOptions {
 	resume?: QuestionAnswerData | null;
 }
 
-export async function createTeachingRuntime(options: RuntimeOptions): Promise<TeachingRuntime> {
+export function createTeachingRuntime(options: RuntimeOptions): TeachingRuntime {
 	const { seam } = options;
 	const graphStore = new FsGraphStore(options.dataRoot);
 	const sessions = new FsSessionsStore(options.dataRoot);
@@ -575,7 +576,10 @@ export async function createTeachingRuntime(options: RuntimeOptions): Promise<Te
 			// brief arrives as a queued message when it lands (the wake seam).
 			void Promise.resolve(seam.runRole(role, args as Record<string, unknown>, new AbortController().signal))
 				.then((brief) => {
-					if (typeof brief === "string" && brief.length > 0) {
+					const notice = artifactCompletionText(brief);
+					if (notice) {
+						void seam.queueMessage(`[deep-learning artifact] ${notice}`).catch(() => {});
+					} else if (typeof brief === "string" && brief.length > 0) {
 						void seam.queueMessage(`[deep-learning artifact] ${name} result:\n${brief}`).catch(() => {});
 					}
 				})

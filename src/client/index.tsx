@@ -1,149 +1,114 @@
-/**
- * deep-learning client entry — the browser half (dual-face plugin).
- *
- * Registrations are SYNCHRONOUS (the plugin lifecycle contract: apply()
- * must register its effects before returning; async imports would land
- * after the host snapshotted its slots):
- *   1. The Learning main panel — slots.inject("main", key:"deep-learning")
- *      + the sidebar.panellist entry ("Learn Mode") that opens it.
- *   2. Toolview cards for the teaching/practice tools
- *      + the question answer UI that posts to /api/deep-learning.
- *   3. The composer-dock question companion.
- *   4. The settings section "Deep Learning".
- */
-
 import { LearningPanel } from "./panel.js";
 import { PanelErrorBoundary } from "./boundary.js";
 import { registerQuestionCards } from "./question-cards.js";
 import { registerSettingsSection } from "./settings-section.js";
+import { LearningSidebarTab, LearningSidebarTitle } from "./sidebar.js";
+import { mutateLearningMode, readLearningMode, type LearningModeState } from "./mode-api.js";
 import { ensureStyle } from "./styles.js";
 import * as React from "react";
-import type { SlotsLike } from "./slots-types.js";
+import type { ActivityOwnerProps, ClientContextLike, SlotsLike } from "./slots-types.js";
 
 export const name = "deep-learning-client";
-
-/** Dual-face plugins declare the services they consume on the client. */
-export const inject = ["slots"];
-
-/** The API root the panel talks to (the plugin's /api prefix). */
+export const inject = ["slots", "shortcuts", "sidebarRight", "sidebarRightTabs"];
 const API = "/api/deep-learning";
+const LEARNING_TAB_KIND = "deep-learning";
+const LEARNING_TAB_ID = "deep-learning";
 
-/** Apply the client plugin over the browser cordis context. */
 export function apply(ctx: unknown): void {
-	// The client-runner contract: services arrive via ctx.get(name) (the
-	// property-access guard withholds undeclared seats; every working
-	// plugin — all-usage, dshmarket, plugin-manager — resolves slots
-	// through get()).
-	const c = ctx as { get?(name: string): unknown; fiber?: { inject?: Record<string, unknown> } };
-	// eslint-disable-next-line no-console -- activation trace
-	console.log("[dl] apply called; fiber.inject:", Object.keys(c.fiber?.inject ?? {}), "get:", typeof c.get);
-	// Diagnostic beacon: report activation to the plugin's server route.
-	try {
-		fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "apply", injectKeys: Object.keys(c.fiber?.inject ?? {}), hasGet: typeof c.get }),
-		}).catch(() => {});
-	} catch {
-		/* beacon is best-effort */
-	}
-	ensureStyle();
-	// Try BOTH access forms (property per the browser-cordis guard, get()
-	// per the runner docs) — whichever the platform provides.
-	const slots = (c.get?.("slots") ?? (c as { slots?: SlotsLike }).slots) as SlotsLike | undefined;
-	// eslint-disable-next-line no-console -- activation trace
-	console.log("[dl] slots resolved:", typeof slots, "inject:", typeof slots?.inject);
-	try {
-		fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "slots", slotsType: typeof slots, injectType: typeof slots?.inject }),
-		}).catch(() => {});
-	} catch {
-		/* beacon is best-effort */
-	}
-	if (!slots) return;
-	try {
+  ensureStyle();
+  const root = ctx as ClientContextLike;
+  const slots = (root.get?.("slots") ?? root.slots) as SlotsLike | undefined;
+  if (!slots) return;
+  registerBaseSlots(slots);
 
-	slots.inject("main", function* () {
-		void fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "main-callback" }),
-		}).catch(() => {});
-		yield slots.register(
-			{
-				name: "main",
-				key: "deep-learning",
-				inject: () => ({ apiRoot: API }),
-			},
-			function BoundedPanel(props: Record<string, unknown>) {
-				return React.createElement(PanelErrorBoundary, null, React.createElement(LearningPanel, props));
-			},
-		);
-		void fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "main-registered" }),
-		}).catch(() => {});
-	});
-	slots.inject("sidebar.panellist", () => {
-		// Diagnostic: did the parent ever invoke this registration callback?
-		void fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "panellist-callback" }),
-		}).catch(() => {});
-		const dispose = slots.register(
-			{
-				name: "sidebar.panellist",
-				id: "deep-learning",
-				order: 30,
-				label: () => "Learn Mode",
-			},
-			PanelIcon,
-		);
-		void fetch("/api/deep-learning/diag", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ at: Date.now(), kind: "panellist-registered" }),
-		}).catch(() => {});
-		return dispose;
-	});
-		registerQuestionCards(slots, API);
-		registerSettingsSection(slots, API);
-	} catch (err) {
-		// eslint-disable-next-line no-console -- activation trace
-		console.error("[dl] registration FAILED:", err);
-		try {
-			fetch("/api/deep-learning/diag", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ at: Date.now(), kind: "error", message: err instanceof Error ? err.message : String(err) }),
-			}).catch(() => {});
-		} catch {
-			/* beacon is best-effort */
-		}
-	}
+  const registerNative = (native: ClientContextLike) => registerNativeSurfaces(native, slots);
+  if (typeof root.inject === "function") {
+    root.inject(["shortcuts", "sidebarRight", "sidebarRightTabs"], registerNative);
+  } else {
+    registerNative({
+      shortcuts: (root.get?.("shortcuts") as ClientContextLike["shortcuts"]),
+      sidebarRight: (root.get?.("sidebarRight") as ClientContextLike["sidebarRight"]),
+      sidebarRightTabs: (root.get?.("sidebarRightTabs") as ClientContextLike["sidebarRightTabs"]),
+      effect: root.effect,
+    });
+  }
 }
 
-// No `export default`: the browser loader resolve prefers `exports.default`,
-// and the bare `apply` function carries no inject. Named exports only.
+function registerBaseSlots(slots: SlotsLike): void {
+  slots.inject("main", () => slots.register({ name: "main", key: LEARNING_TAB_ID, inject: () => ({ apiRoot: API }) }, (props: Record<string, unknown>) => React.createElement(PanelErrorBoundary, null, React.createElement(LearningPanel, props))));
+  slots.inject("sidebar.panellist", () => slots.register({ name: "sidebar.panellist", id: LEARNING_TAB_ID, order: 30, label: () => "Learn Mode" }, PanelIcon));
+  registerQuestionCards(slots, API);
+  registerSettingsSection(slots, API);
+}
 
-/** The sidebar's panel icon: a real React component (the slot factory
- *  renders it with the host's React — a plain object return is ignored
- *  and the row silently vanishes). */
+function registerNativeSurfaces(ctx: ClientContextLike, slots: SlotsLike): void {
+  const effect = ctx.effect ?? ((operation: () => void | (() => void)) => { operation(); });
+  if (ctx.shortcuts) {
+    effect(() => ctx.shortcuts?.register({
+      id: "deep-learning.toggle",
+      label: () => "Toggle Learn Mode",
+      aliases: ["learn mode", "learning mode"],
+      defaults: {
+        "desktop:macos": { code: "KeyL", modifiers: ["primary"] },
+        "desktop:windows": { code: "KeyL", modifiers: ["primary"] },
+        "desktop:linux": { code: "KeyL", modifiers: ["primary"] },
+        "web:macos": { code: "KeyL", modifiers: ["primary", "alt"] },
+        "web:windows": { code: "KeyL", modifiers: ["primary", "alt"] },
+      },
+      regions: ["page", "editable", "terminal"],
+      modals: [],
+      resolve: ({ target }: { target: Element | null }) => {
+        const captured = ctx.sidebarRight?.commandTarget(target);
+        if (!captured || !ctx.sidebarRight) return { status: "blocked", reason: "Select a conversation first." };
+        return { status: "handled", run: () => {
+          void mutateLearningMode(API, captured.sessionId, { toggle: true }).then(() => ctx.sidebarRight?.openTabFromTarget(LEARNING_TAB_KIND, captured)).catch(() => undefined);
+        } };
+      },
+    }), "deep-learning: toggle shortcut");
+  }
+  if (ctx.sidebarRightTabs) {
+    effect(() => ctx.sidebarRightTabs?.register({ id: LEARNING_TAB_ID, kind: LEARNING_TAB_KIND, keepMounted: true, title: () => "Learning" }), "deep-learning: sidebar type");
+  }
+  slots.inject("conversation.input.activity", () => slots.register({
+    name: "conversation.input.activity",
+    inject: (sessionId: string) => ({
+      apiRoot: API,
+      sessionId,
+      openSidebar: () => ctx.sidebarRight?.openTabIn(sessionId, LEARNING_TAB_KIND, { params: { view: "overview" } }),
+    }),
+  }, ActivityToggle));
+  slots.inject("sidebar.right.pane.tab", () => slots.register({ name: "sidebar.right.pane.tab", key: LEARNING_TAB_ID }, LearningSidebarTab));
+  slots.inject("sidebar.right.pane.tab.title", () => slots.register({ name: "sidebar.right.pane.tab.title", key: LEARNING_TAB_ID }, LearningSidebarTitle));
+}
+
+function ActivityToggle(props: ActivityOwnerProps & { apiRoot?: string; openSidebar?: () => void }): React.ReactElement {
+  const api = props.apiRoot ?? API;
+  const [state, setState] = React.useState<LearningModeState | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!props.sessionId) { setState(null); return () => { cancelled = true; }; }
+    void readLearningMode(api, props.sessionId).then((value) => { if (!cancelled) setState(value); }).catch(() => { if (!cancelled) setState(null); });
+    return () => { cancelled = true; };
+  }, [api, props.sessionId]);
+  React.useEffect(() => () => props.onActiveChange(false), [props.onActiveChange]);
+  const toggle = () => {
+    if (props.locked || busy || !props.sessionId) return;
+    setBusy(true);
+    void mutateLearningMode(api, props.sessionId, { toggle: true }).then((next) => {
+      setState(next);
+      if (next.enabled) props.openSidebar?.();
+    }).catch(() => undefined).finally(() => setBusy(false));
+  };
+  const enabled = state?.enabled === true;
+  return React.createElement("button", {
+    type: "button", className: "dl-activity", disabled: props.locked || busy || !props.sessionId,
+    "aria-label": enabled ? "Disable Learn Mode" : "Enable Learn Mode", "aria-pressed": enabled,
+    title: enabled ? "Learn Mode on" : "Learn Mode off", onClick: toggle,
+  }, React.createElement("span", { className: "dl-activity-mark", "aria-hidden": "true" }, enabled ? "●" : "○"), "Learn");
+}
+
 function PanelIcon(props: { size?: number } & Record<string, unknown>): React.ReactElement {
-	// A sized, centered box matching the row's glyph slot (the other entries
-	// render sized icon primitives; a bare inline glyph shifts alignment).
-	const size = typeof props.size === "number" ? props.size : 18;
-	return React.createElement(
-		"span",
-		{
-			className: "dl-panel-icon",
-			style: { width: `${size}px`, height: `${size}px`, display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: `${Math.round(size * 0.83)}px`, lineHeight: 1 },
-			"aria-hidden": "true",
-		},
-		"\u25C6",
-	);
+  const size = typeof props.size === "number" ? props.size : 18;
+  return React.createElement("span", { className: "dl-panel-icon", style: { width: size, height: size, display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "none" }, "aria-hidden": "true" }, "◈");
 }

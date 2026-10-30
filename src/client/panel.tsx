@@ -1,460 +1,192 @@
-/**
- * The Learning main panel — the knowledge graph canvas, the chain table,
- * notes import, and new teach/practice drafts. The graph is the home
- * page of the learning loop (the ported law); the canvas is a hand-rolled
- * Canvas 2D renderer over the snapshot's derived view (no sigma/d3-render
- * deps — the original's own choice, kept).
- */
-
 import * as React from "react";
 import { ensureStyle } from "./styles.js";
+import { parseArtifactsResponse, parseSnapshot, type Snapshot, type SnapshotNode } from "./contracts.js";
+import type { LearningArtifact } from "../store/artifacts.js";
+type View = "overview" | "map" | "chains" | "diagrams" | "sources";
 
-interface SnapshotNode {
-	id: string;
-	name: string;
-	statement: string;
-	aliases: string[];
-	provenance: Array<{ chatId: string; messageId: string }>;
-}
-interface Snapshot {
-	nodes: SnapshotNode[];
-	propositions: SnapshotNode[];
-	edges: Array<{ from: string; to: string }>;
-	chains: Array<{ id: string; premises: string[]; conclusion: string; provenance: Array<{ chatId: string }> }>;
-	sessions: Record<string, string>;
-	fileSources: Record<string, string>;
-	nodeSessions: Record<string, string[]>;
-	clusters: Array<{ id: string; label: string | null; members: string[] }>;
-	positions?: Record<string, { x: number; y: number }>;
-}
-
-type View = "graph" | "chains" | "draft" | "import";
-
-export function LearningPanel(props: { apiRoot?: string } & Record<string, unknown>): React.ReactElement {
-	ensureStyle();
-	const api = props.apiRoot ?? "/api/deep-learning";
-	const [view, setView] = React.useState<View>("graph");
-	const [snapshot, setSnapshot] = React.useState<Snapshot | null>(null);
-	const [error, setError] = React.useState<string | null>(null);
-
-	const load = React.useCallback(() => {
-		fetch(`${api}/graph`)
-			.then((r) => r.json())
-			.then((data: Snapshot) => {
-				setSnapshot(data);
-				setError(null);
-			})
-			.catch(() => setError("graph unavailable"));
-	}, [api]);
-
-	React.useEffect(() => {
-		load();
-	}, [load]);
-
-	const propositionCount = snapshot?.propositions.length ?? 0;
-	const chainCount = snapshot?.chains.length ?? 0;
-
-	return React.createElement(
-		"div",
-		{ className: "dl-root" },
-		React.createElement(
-			"div",
-			{ className: "dl-head" },
-			React.createElement("span", { className: "dl-title" }, "Learning"),
-			React.createElement("span", { className: "dl-sub" }, "knowledge graph"),
-			React.createElement("span", { className: "dl-spacer" }),
-			React.createElement(
-				"span",
-				{ className: "dl-count" },
-				`${propositionCount} propositions · ${chainCount} chains`,
-			),
-		),
-		React.createElement(
-			"div",
-			{ className: "dl-toolbar" },
-			React.createElement(
-				"button",
-				{ className: "dl-btn", "data-on": view === "graph" ? "true" : "false", onClick: () => setView("graph") },
-				"graph",
-			),
-			React.createElement(
-				"button",
-				{ className: "dl-btn", "data-on": view === "chains" ? "true" : "false", onClick: () => setView("chains") },
-				"chains",
-			),
-			React.createElement("span", { className: "dl-spacer" }),
-			React.createElement("button", { className: "dl-btn", onClick: () => setView("import") }, "import notes"),
-			React.createElement("button", { className: "dl-btn", onClick: () => setView("draft") }, "new session"),
-		),
-		React.createElement(
-			"div",
-			{ className: "dl-body" },
-			error !== null && React.createElement("div", { className: "dl-empty" }, error),
-			error === null &&
-				(view === "graph"
-					? React.createElement(GraphCanvas, { snapshot: snapshot })
-					: view === "chains"
-						? React.createElement(ChainTable, { snapshot: snapshot })
-						: view === "draft"
-							? React.createElement(NewSessionDraft, { api: api })
-							: React.createElement(NotesImport, { api: api, onImported: load })),
-		),
-	);
+export function LearningPanel(props: { apiRoot?: string; initialView?: string; sessionId?: string } & Record<string, unknown>): React.ReactElement {
+  ensureStyle();
+  const api = props.apiRoot ?? "/api/deep-learning";
+  const initialView = isView(props.initialView) ? props.initialView : "overview";
+  const [view, setView] = React.useState<View>(initialView);
+  const [snapshot, setSnapshot] = React.useState<Snapshot | null>(null);
+  const [artifacts, setArtifacts] = React.useState<LearningArtifact[]>([]);
+  const [artifactError, setArtifactError] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const load = React.useCallback(() => {
+    let cancelled = false;
+    fetch(api + "/graph")
+      .then((response) => response.json())
+      .then((value: unknown) => {
+        if (cancelled) return;
+        const parsed = parseSnapshot(value);
+        if (parsed === null) setError("graph returned an invalid snapshot");
+        else { setSnapshot(parsed); setError(null); }
+      })
+      .catch(() => { if (!cancelled) setError("graph unavailable"); });
+    return () => { cancelled = true; };
+  }, [api]);
+  React.useEffect(load, [load]);
+  React.useEffect(() => {
+    if (view !== "diagrams" || !props.sessionId) {
+      setArtifacts([]);
+      setArtifactError(null);
+      return;
+    }
+    let cancelled = false;
+    setArtifactError(null);
+    fetch(api + "/artifacts?session=" + encodeURIComponent(props.sessionId))
+      .then((response) => { if (!response.ok) throw new Error("artifact request failed"); return response.json(); })
+      .then((value: unknown) => {
+        if (cancelled) return;
+        const parsed = parseArtifactsResponse(value);
+        if (parsed === null) setArtifactError("artifacts returned an invalid response");
+        else setArtifacts(parsed);
+      })
+      .catch(() => { if (!cancelled) setArtifactError("artifacts unavailable"); });
+    return () => { cancelled = true; };
+  }, [api, props.sessionId, view]);
+  const propositionCount = snapshot?.propositions.length ?? 0;
+  const chainCount = snapshot?.chains.length ?? 0;
+  const tabs: Array<[View, string]> = [["overview", "Overview"], ["map", "Map"], ["chains", "Chains"], ["diagrams", "Diagrams"], ["sources", "Sources"]];
+  return React.createElement(
+    "section", { className: "dl-root", "aria-label": "Learning workspace" },
+    React.createElement("header", { className: "dl-head" },
+      React.createElement("div", null,
+        React.createElement("div", { className: "dl-title" }, "Learning"),
+        React.createElement("div", { className: "dl-sub" }, "measured understanding and durable knowledge"),
+      ),
+      React.createElement("span", { className: "dl-spacer" }),
+      React.createElement("span", { className: "dl-count", "aria-live": "polite" }, String(propositionCount) + " propositions / " + String(chainCount) + " chains"),
+    ),
+    React.createElement("nav", { className: "dl-tabs", role: "tablist", "aria-label": "Learning views" },
+      tabs.map(([key, label]) => React.createElement("button", {
+        key, type: "button", role: "tab", className: "dl-tab", "aria-selected": view === key,
+        tabIndex: view === key ? 0 : -1, onClick: () => setView(key),
+      }, label)),
+    ),
+    React.createElement("main", { className: "dl-body" },
+      error !== null && React.createElement("div", { className: "dl-error", role: "alert" }, error),
+      error === null && view === "overview" && React.createElement(Overview, { snapshot, api, onImported: load }),
+      error === null && view === "map" && React.createElement(GraphMap, { snapshot }),
+      error === null && view === "chains" && React.createElement(ChainTable, { snapshot }),
+      error === null && view === "diagrams" && React.createElement(ArtifactsView, { artifacts, error: artifactError, hasSession: Boolean(props.sessionId) }),
+      error === null && view === "sources" && React.createElement(SourcesView, { snapshot }),
+    ),
+  );
 }
 
-// ─── the graph canvas (Canvas 2D over the snapshot) ──────────────────────────
-
-function GraphCanvas({ snapshot }: { snapshot: Snapshot | null }): React.ReactElement {
-	const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-	const [camera, setCamera] = React.useState({ x: 0, y: 0, k: 1 });
-	const [selected, setSelected] = React.useState<string | null>(null);
-	const dragRef = React.useRef<{ x: number; y: number } | null>(null);
-
-	React.useEffect(() => {
-		const canvas = canvasRef.current;
-		if (!canvas) return;
-		const ctx = canvas.getContext("2d");
-		if (!ctx) return;
-		const w = canvas.clientWidth;
-		const h = canvas.clientHeight;
-		canvas.width = w * window.devicePixelRatio;
-		canvas.height = h * window.devicePixelRatio;
-		ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
-
-		ctx.fillStyle = "#0b0b0b";
-		ctx.fillRect(0, 0, w, h);
-		if (!snapshot || snapshot.nodes.length === 0) return;
-
-		const positions = snapshot.positions ?? {};
-		const byId = new Map(snapshot.nodes.map((n) => [n.id, n]));
-		// Fallback layout: deterministic circle by index (no positions yet).
-		const fallback = (id: string, index: number): { x: number; y: number } => {
-			const p = positions[id];
-			if (p) return p;
-			const angle = (index / Math.max(snapshot.nodes.length, 1)) * Math.PI * 2;
-			return { x: Math.cos(angle) * 200, y: Math.sin(angle) * 200 };
-		};
-		const idOrder = snapshot.nodes.map((n) => n.id);
-		const posOf = (id: string) => fallback(id, idOrder.indexOf(id));
-
-		const world = (p: { x: number; y: number }): { x: number; y: number } => ({
-			x: p.x * camera.k + w / 2 + camera.x,
-			y: p.y * camera.k + h / 2 + camera.y,
-		});
-
-		// Edges (hairline; the selected node's edges in cyan).
-		ctx.strokeStyle = "#1c1c1c";
-		ctx.lineWidth = 1;
-		for (const edge of snapshot.edges) {
-			const from = byId.get(edge.from);
-			const to = byId.get(edge.to);
-			if (!from || !to) continue;
-			const a = world(posOf(edge.from));
-			const b = world(posOf(edge.to));
-			ctx.beginPath();
-			ctx.moveTo(a.x, a.y);
-			ctx.lineTo(b.x, b.y);
-			ctx.stroke();
-		}
-		if (selected !== null) {
-			ctx.strokeStyle = "#38bdf8";
-			for (const edge of snapshot.edges) {
-				if (edge.from !== selected && edge.to !== selected) continue;
-				const a = world(posOf(edge.from));
-				const b = world(posOf(edge.to));
-				ctx.beginPath();
-				ctx.moveTo(a.x, a.y);
-				ctx.lineTo(b.x, b.y);
-				ctx.stroke();
-			}
-			ctx.strokeStyle = "#1c1c1c";
-		}
-
-		// Nodes: square markers (the brand's square rule), labels gated on zoom.
-		ctx.font = "11px 'JetBrains Mono', monospace";
-		for (const node of snapshot.nodes) {
-			const p = world(posOf(node.id));
-			const isImp = node.name === "⟹";
-			const isSel = node.id === selected;
-			ctx.fillStyle = isSel ? "#38bdf8" : isImp ? "#333333" : "#4ade80";
-			if (isImp) {
-				ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
-			} else {
-				ctx.fillRect(p.x - 4, p.y - 4, 8, 8);
-			}
-			if (camera.k > 0.5 && !isImp) {
-				ctx.fillStyle = isSel ? "#ffffff" : "#cccccc";
-				ctx.fillText(node.name, p.x + 8, p.y + 4);
-			}
-		}
-	}, [snapshot, camera, selected]);
-
-	// Drag to pan; click selects; wheel zooms.
-	const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-		dragRef.current = { x: e.clientX - camera.x, y: e.clientY - camera.y };
-	};
-	const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-		if (!dragRef.current) return;
-		setCamera((c) => ({ ...c, x: e.clientX - dragRef.current!.x, y: e.clientY - dragRef.current!.y }));
-	};
-	const onPointerUp = () => {
-		dragRef.current = null;
-	};
-	const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-		const factor = e.deltaY < 0 ? 1.15 : 0.87;
-		setCamera((c) => ({ ...c, k: Math.min(4, Math.max(0.15, c.k * factor)) }));
-	};
-	const onClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-		if (!snapshot) return;
-		const canvas = canvasRef.current;
-		if (!canvas) return;
-		const rect = canvas.getBoundingClientRect();
-		const mx = e.clientX - rect.left;
-		const my = e.clientY - rect.top;
-		// nearest node within 10px
-		const positions = snapshot.positions ?? {};
-		const bestRef: { current: { id: string; d: number } | null } = { current: null };
-		snapshot.nodes.forEach((node, index) => {
-			const p = positions[node.id] ?? {
-				x: Math.cos((index / snapshot.nodes.length) * Math.PI * 2) * 200,
-				y: Math.sin((index / snapshot.nodes.length) * Math.PI * 2) * 200,
-			};
-			const sx = p.x * camera.k + rect.width / 2 + camera.x;
-			const sy = p.y * camera.k + rect.height / 2 + camera.y;
-			const d = Math.hypot(sx - mx, sy - my);
-			if (d < 12 && (bestRef.current === null || d < bestRef.current.d)) bestRef.current = { id: node.id, d };
-		});
-		setSelected(bestRef.current ? bestRef.current.id : null);
-	};
-
-	const selectedNode = snapshot?.nodes.find((n) => n.id === selected) ?? null;
-
-	return React.createElement(
-		"div",
-		{ className: "dl-canvas-wrap" },
-		snapshot !== null && snapshot.nodes.length > 0
-			? React.createElement("canvas", {
-					ref: canvasRef,
-					className: "dl-canvas",
-					onPointerDown,
-					onPointerMove,
-					onPointerUp,
-					onWheel,
-					onClick,
-				})
-			: React.createElement(
-					"div",
-					{ className: "dl-empty" },
-					"no knowledge yet — teach a session or import notes, and the graph grows here",
-				),
-		selectedNode !== null &&
-			React.createElement(
-				"div",
-				{
-					style: {
-						position: "absolute",
-						right: 16,
-						bottom: 16,
-						maxWidth: 340,
-						background: "#111111",
-						border: "1px solid #222222",
-						padding: "12px 14px",
-						fontSize: 12,
-					},
-				},
-				React.createElement("div", { style: { color: "#ffffff", fontWeight: 600, marginBottom: 4 } }, selectedNode.name),
-				React.createElement("div", { style: { color: "#cccccc" } }, selectedNode.statement),
-				selectedNode.aliases.length > 0 &&
-					React.createElement(
-						"div",
-						{ style: { color: "#888888", marginTop: 6, fontSize: 11 } },
-						selectedNode.aliases.join(" · "),
-					),
-			),
-	);
+function Overview({ snapshot, api, onImported }: { snapshot: Snapshot | null; api: string; onImported: () => void }): React.ReactElement {
+  return React.createElement("div", { className: "dl-overview" },
+    React.createElement("div", { className: "dl-overview-grid" },
+      React.createElement(Stat, { label: "Propositions", value: snapshot?.propositions.length ?? 0 }),
+      React.createElement(Stat, { label: "Reasoning chains", value: snapshot?.chains.length ?? 0 }),
+      React.createElement(Stat, { label: "Sessions", value: Object.keys(snapshot?.sessions ?? {}).length }),
+      React.createElement(Stat, { label: "Sources", value: Object.keys(snapshot?.fileSources ?? {}).length }),
+    ),
+    React.createElement("div", { className: "dl-section-heading" }, "Start or extend a lesson"),
+    React.createElement(NewSessionDraft, { api }),
+    React.createElement("div", { className: "dl-section-heading" }, "Import durable notes"),
+    React.createElement(NotesImport, { api, onImported }),
+  );
+}
+function Stat({ label, value }: { label: string; value: number }): React.ReactElement {
+  return React.createElement("div", { className: "dl-stat" }, React.createElement("strong", null, String(value)), React.createElement("span", null, label));
 }
 
-// ─── the chain table ──────────────────────────────────────────────────────────
+function GraphMap({ snapshot }: { snapshot: Snapshot | null }): React.ReactElement {
+  const nodes = uniqueNodes(snapshot);
+  const [selected, setSelected] = React.useState<string | null>(null);
+  if (nodes.length === 0) return React.createElement(EmptyView, { title: "The map is ready", text: "Teach a session or import notes and the dependency map will appear here." });
+  const positioned = layoutNodes(nodes);
+  const byId = new Map(positioned.map((entry) => [entry.node.id, entry]));
+  const edges = (snapshot?.edges ?? []).filter((edge) => byId.has(edge.from) && byId.has(edge.to));
+  const selectedNode = nodes.find((node) => node.id === selected) ?? null;
+  return React.createElement("div", { className: "dl-map-shell" },
+    React.createElement("div", { className: "dl-map-meta" }, "Select a node to inspect its statement. Use Tab and Enter to navigate the map."),
+    React.createElement("svg", { className: "dl-map", viewBox: "0 0 760 440", role: "group", "aria-label": "Knowledge dependency map" },
+      React.createElement("defs", null, React.createElement("marker", { id: "dl-arrow", markerWidth: 8, markerHeight: 8, refX: 7, refY: 4, orient: "auto" }, React.createElement("path", { d: "M0,0 L8,4 L0,8 Z", fill: "currentColor" }))),
+      edges.map((edge) => {
+        const from = byId.get(edge.from); const to = byId.get(edge.to);
+        if (!from || !to) return null;
+        return React.createElement("line", { key: edge.from + "-" + edge.to, className: "dl-map-edge", x1: from.x, y1: from.y, x2: to.x, y2: to.y, markerEnd: "url(#dl-arrow)", "aria-hidden": "true" });
+      }),
+      positioned.map(({ node, x, y }, index) => React.createElement("g", {
+        key: node.id, className: "dl-map-node", transform: "translate(" + x + " " + y + ")", role: "button", tabIndex: 0,
+        "aria-label": node.name + ": " + node.statement, "aria-pressed": selected === node.id,
+        onClick: () => setSelected(node.id), onKeyDown: (event: React.KeyboardEvent<SVGGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelected(node.id); } },
+        style: { animationDelay: String(index * 35) + "ms" },
+      }, React.createElement("circle", { r: selected === node.id ? 25 : 20, className: selected === node.id ? "dl-map-dot dl-map-dot-selected" : "dl-map-dot" }), React.createElement("text", { className: "dl-map-label", x: 30, y: 4 }, truncate(node.name, 26)))),
+    ),
+    selectedNode !== null && React.createElement("aside", { className: "dl-map-inspector", "aria-live": "polite" }, React.createElement("strong", null, selectedNode.name), React.createElement("p", null, selectedNode.statement), selectedNode.aliases.length > 0 && React.createElement("span", null, selectedNode.aliases.join(" / "))),
+  );
+}
 
 function ChainTable({ snapshot }: { snapshot: Snapshot | null }): React.ReactElement {
-	const chains = (snapshot?.chains ?? []).filter(
-		(c): c is NonNullable<typeof c> =>
-			c !== null && typeof c === "object" && Array.isArray(c.premises) && typeof c.conclusion === "string",
-	);
-	const propositions = (snapshot?.propositions ?? []).filter((n): n is NonNullable<typeof n> => n != null);
-	const rows = chains
-		.map((chain) => {
-			const names = propositions.filter((n) => chain.premises.includes(n.id) || chain.conclusion === n.id);
-			const nameOf = (id: string) => names.find((n) => n.id === id)?.name ?? id;
-			return {
-				id: chain.id ?? "",
-				line: `${[...chain.premises].sort().map(nameOf).join(", ")} → ${nameOf(chain.conclusion)}`,
-				provenance: (Array.isArray(chain.provenance) ? chain.provenance : []).map(
-					(pt) => snapshot?.sessions?.[pt?.chatId ?? ""] ?? snapshot?.fileSources?.[pt?.chatId ?? ""] ?? pt?.chatId ?? "",
-				),
-			};
-		})
-		.sort((a, b) => a.id.localeCompare(b.id));
-
-	if (rows.length === 0) {
-		return React.createElement("div", { className: "dl-empty" }, "no reasoning chains yet");
-	}
-	return React.createElement(
-		"div",
-		{ className: "dl-table-wrap" },
-		React.createElement(
-			"table",
-			{ className: "dl-table" },
-			React.createElement(
-				"thead",
-				null,
-				React.createElement(
-					"tr",
-					null,
-					React.createElement("th", null, "argument"),
-					React.createElement("th", null, "born in"),
-				),
-			),
-			React.createElement(
-				"tbody",
-				null,
-				rows.map((row) =>
-					React.createElement(
-						"tr",
-						{ key: row.id },
-						React.createElement("td", null, row.line),
-						React.createElement("td", { className: "dl-num" }, row.provenance.join(" · ")),
-					),
-				),
-			),
-		),
-	);
+  const propositions = snapshot?.propositions ?? [];
+  const nameOf = (id: string) => propositions.find((node) => node.id === id)?.name ?? id;
+  const chains = snapshot?.chains ?? [];
+  if (chains.length === 0) return React.createElement(EmptyView, { title: "No reasoning chains yet", text: "A completed teaching step will add premise-to-conclusion structure here." });
+  return React.createElement("div", { className: "dl-table-wrap" }, React.createElement("table", { className: "dl-table" },
+    React.createElement("caption", { className: "dl-sr-only" }, "Reasoning chains"),
+    React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Argument"), React.createElement("th", null, "Source"))),
+    React.createElement("tbody", null, chains.map((chain) => React.createElement("tr", { key: chain.id }, React.createElement("td", null, chain.premises.map(nameOf).join(", ") + " -> " + nameOf(chain.conclusion)), React.createElement("td", { className: "dl-num" }, chain.provenance.map((item) => snapshot?.sessions[item.chatId] ?? item.chatId).join(" / "))))),
+  ));
+}
+function ArtifactsView({ artifacts, error, hasSession }: { artifacts: LearningArtifact[]; error: string | null; hasSession: boolean }): React.ReactElement {
+  if (!hasSession) return React.createElement(EmptyView, { title: "Open a lesson to see diagrams", text: "Generated demos and figures are scoped to the active learning session." });
+  if (error !== null) return React.createElement("div", { className: "dl-error", role: "alert" }, error);
+  if (artifacts.length === 0) return React.createElement(EmptyView, { title: "No diagrams yet", text: "Use the teaching tools to generate a demo or figure. Saved artifacts appear here without running scripts in the panel." });
+  return React.createElement("div", { className: "dl-artifact-list" }, artifacts.map((artifact) => React.createElement("article", { className: "dl-artifact", key: artifact.id },
+    React.createElement("header", null, React.createElement("strong", null, artifact.title), React.createElement("span", null, artifact.kind === "demo" ? "Interactive demo" : "Visual figure")),
+    artifact.notes && React.createElement("p", null, artifact.notes),
+    React.createElement("iframe", { className: "dl-artifact-frame", title: artifact.title, sandbox: "", srcDoc: artifact.content })
+  )));
 }
 
-// ─── new session draft ────────────────────────────────────────────────────────
+function SourcesView({ snapshot }: { snapshot: Snapshot | null }): React.ReactElement {
+  const sources = Object.entries(snapshot?.fileSources ?? {});
+  if (sources.length === 0) return React.createElement(EmptyView, { title: "No imported sources", text: "Imported notes and research sources will be listed here with their graph provenance." });
+  return React.createElement("ul", { className: "dl-source-list" }, sources.map(([id, label]) => React.createElement("li", { key: id }, React.createElement("strong", null, label), React.createElement("span", null, id))));
+}
+function EmptyView({ title, text }: { title: string; text: string }): React.ReactElement {
+  return React.createElement("div", { className: "dl-empty" }, React.createElement("strong", null, title), React.createElement("p", null, text));
+}
 
 function NewSessionDraft({ api }: { api: string }): React.ReactElement {
-	const [mode, setMode] = React.useState<"teach" | "practice">("teach");
-	const [goal, setGoal] = React.useState("");
-	const [status, setStatus] = React.useState<string | null>(null);
-
-	const start = () => {
-		if (goal.trim().length === 0) {
-			setStatus("say what you want to learn first");
-			return;
-		}
-		setStatus("starting…");
-		// The plugin's own route: server-side create + Learn Mode title mark +
-		// the kind-marker prompt (the fold reads the session kind from it).
-		fetch(`${api}/session/start`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ mode, goal }),
-		})
-			.then((r) => r.json())
-			.then((value: { ok?: boolean; sessionId?: string; error?: string }) => {
-				if (value.ok === true && value.sessionId) {
-					window.location.hash = `#/session/${value.sessionId}`;
-					setStatus(null);
-				} else {
-					setStatus(value.error ?? "session create failed");
-				}
-			})
-			.catch(() => setStatus("session create failed"));
-	};
-
-	return React.createElement(
-		"div",
-		{ className: "dl-draft" },
-		React.createElement(
-			"div",
-			{ className: "dl-mode-row" },
-			React.createElement(
-				"button",
-				{ className: "dl-mode", "data-on": mode === "teach" ? "true" : "false", onClick: () => setMode("teach") },
-				"teach",
-			),
-			React.createElement(
-				"button",
-				{ className: "dl-mode", "data-on": mode === "practice" ? "true" : "false", onClick: () => setMode("practice") },
-				"practice",
-			),
-		),
-		React.createElement(
-			"label",
-			null,
-			mode === "teach" ? "what do you want to understand?" : "what do you want to practice?",
-			React.createElement("textarea", {
-				className: "dl-textarea",
-				value: goal,
-				onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setGoal(e.target.value),
-				placeholder: mode === "teach" ? "e.g. why the chain rule works" : "e.g. derivative word problems",
-			}),
-		),
-		status !== null && React.createElement("div", { className: "dl-error" }, status),
-		React.createElement(
-			"div",
-			null,
-			React.createElement("button", { className: "dl-btn", onClick: start, disabled: status === "starting…" }, "start session"),
-		),
-	);
+  const [mode, setMode] = React.useState<"teach" | "practice">("teach");
+  const [goal, setGoal] = React.useState(""); const [status, setStatus] = React.useState<string | null>(null);
+  const start = () => {
+    if (!goal.trim()) { setStatus("Say what you want to learn first."); return; }
+    setStatus("Starting...");
+    fetch(api + "/session/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode, goal }) })
+      .then((response) => response.json()).then((value: { ok?: boolean; sessionId?: string; error?: string }) => { if (value.ok && value.sessionId) window.location.hash = "#/session/" + value.sessionId; else setStatus(value.error ?? "Session create failed."); }).catch(() => setStatus("Session create failed."));
+  };
+  return React.createElement("div", { className: "dl-draft" },
+    React.createElement("div", { className: "dl-mode-row", role: "group", "aria-label": "Lesson type" }, React.createElement("button", { type: "button", className: "dl-mode", "data-on": mode === "teach", onClick: () => setMode("teach") }, "Teach"), React.createElement("button", { type: "button", className: "dl-mode", "data-on": mode === "practice", onClick: () => setMode("practice") }, "Practice")),
+    React.createElement("label", { className: "dl-draft-label" }, mode === "teach" ? "What do you want to understand?" : "What do you want to practice?", React.createElement("textarea", { className: "dl-textarea", value: goal, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setGoal(event.target.value), placeholder: "e.g. why the chain rule works" })),
+    status !== null && React.createElement("div", { className: "dl-status", role: "status" }, status),
+    React.createElement("button", { type: "button", className: "dl-btn", onClick: start, disabled: status === "Starting..." }, "Start session"),
+  );
 }
-
-// ─── notes import ─────────────────────────────────────────────────────────────
-
 function NotesImport({ api, onImported }: { api: string; onImported: () => void }): React.ReactElement {
-	const [text, setText] = React.useState("");
-	const [status, setStatus] = React.useState<string | null>(null);
-	const [busy, setBusy] = React.useState(false);
-
-	const submit = () => {
-		if (text.trim().length === 0) {
-			setStatus("paste your notes first");
-			return;
-		}
-		setBusy(true);
-		setStatus("importing…");
-		fetch(`${api}/notes/import`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ text, filePath: `pasted-${new Date().toISOString().slice(0, 10)}.md` }),
-		})
-			.then((r) => r.json())
-			.then((value: { nodes?: number; chains?: number; error?: string }) => {
-				setBusy(false);
-				if (value.error) {
-					setStatus(`import failed: ${value.error}`);
-				} else {
-					setStatus(`merged ${value.nodes ?? 0} propositions, ${value.chains ?? 0} chains`);
-					onImported();
-				}
-			})
-			.catch(() => {
-				setBusy(false);
-				setStatus("import failed");
-			});
-	};
-
-	return React.createElement(
-		"div",
-		{ className: "dl-draft" },
-		React.createElement(
-			"label",
-			null,
-			"paste notes to import into the graph",
-			React.createElement("textarea", {
-				className: "dl-textarea",
-				value: text,
-				onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setText(e.target.value),
-				style: { minHeight: 200 },
-				placeholder: "any markdown or plain text…",
-			}),
-		),
-		status !== null && React.createElement("div", { className: "dl-status", "data-err": status.includes("failed") ? "true" : "false" }, status),
-		React.createElement(
-			"div",
-			null,
-			React.createElement("button", { className: "dl-btn", onClick: submit, disabled: busy }, "import"),
-		),
-	);
+  const [text, setText] = React.useState(""); const [status, setStatus] = React.useState<string | null>(null); const [busy, setBusy] = React.useState(false);
+  const submit = () => {
+    if (!text.trim()) { setStatus("Paste your notes first."); return; }
+    setBusy(true); setStatus("Importing...");
+    fetch(api + "/notes/import", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, filePath: "pasted.md" }) })
+      .then((response) => response.json()).then((value: { nodes?: number; chains?: number; error?: string }) => { setBusy(false); if (value.error) setStatus("Import failed: " + value.error); else { setStatus("Merged " + String(value.nodes ?? 0) + " propositions, " + String(value.chains ?? 0) + " chains."); setText(""); onImported(); } }).catch(() => { setBusy(false); setStatus("Import failed."); });
+  };
+  return React.createElement("div", { className: "dl-draft" }, React.createElement("label", { className: "dl-draft-label" }, "Markdown notes", React.createElement("textarea", { className: "dl-textarea", value: text, onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setText(event.target.value), placeholder: "Paste notes to extract propositions and chains." })), status !== null && React.createElement("div", { className: "dl-status", role: "status" }, status), React.createElement("button", { type: "button", className: "dl-btn", onClick: submit, disabled: busy }, busy ? "Importing..." : "Import notes"));
 }
+function uniqueNodes(snapshot: Snapshot | null): SnapshotNode[] {
+  const map = new Map<string, SnapshotNode>();
+  for (const node of [...(snapshot?.nodes ?? []), ...(snapshot?.propositions ?? [])]) if (node && typeof node.id === "string") map.set(node.id, node);
+  return [...map.values()];
+}
+function layoutNodes(nodes: SnapshotNode[]): Array<{ node: SnapshotNode; x: number; y: number }> {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(nodes.length))); const gapX = columns > 1 ? 650 / (columns - 1) : 0;
+  return nodes.map((node, index) => ({ node, x: columns === 1 ? 380 : 55 + (index % columns) * gapX, y: 70 + Math.floor(index / columns) * 105 }));
+}
+function truncate(value: string, max: number): string { return value.length > max ? value.slice(0, max - 1) + "..." : value; }
+function isView(value: unknown): value is View { return value === "overview" || value === "map" || value === "chains" || value === "diagrams" || value === "sources"; }
